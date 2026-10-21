@@ -17,7 +17,7 @@ pipeline {
                         mkdir -p /app
                         cd /app
                         tar -xf -
-                        npm audit --audit-level=critical
+                        npm audit --omit=dev --audit-level=high
                     '
                 '''
             }
@@ -38,11 +38,37 @@ pipeline {
                 '''
             }
         }
+
+        stage('Trivy Backend Security Scan') {
+            steps {
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:latest image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        ai-devsecops-backend:ci
+                '''
+            }
+        }
+
+        stage('Trivy Frontend Security Scan') {
+            steps {
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:latest image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        ai-devsecops-frontend:ci
+                '''
+            }
+        }
     }
 
     post {
         success {
-            echo 'SUCCESS: Security scan passed and Docker images built.'
+            echo 'SUCCESS: npm audit and Trivy scans passed. Docker images built.'
         }
 
         failure {

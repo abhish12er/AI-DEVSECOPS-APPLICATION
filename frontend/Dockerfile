@@ -1,8 +1,10 @@
 
-# Stage 1: Build React application
-FROM node:24-alpine AS build
+# Stage 1: Build React frontend
+FROM node:24-alpine AS builder
 
 WORKDIR /app
+
+RUN apk upgrade --no-cache
 
 COPY package*.json ./
 
@@ -10,16 +12,15 @@ RUN npm ci
 
 COPY . .
 
-ARG VITE_API_URL=http://localhost:5001/api
-ENV VITE_API_URL=$VITE_API_URL
-
 RUN npm run build
 
-# Stage 2: Serve with Nginx
-FROM nginx:alpine
 
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Stage 2: Serve frontend using Nginx
+FROM nginx:stable-alpine
+
+RUN apk upgrade --no-cache
+
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80
 

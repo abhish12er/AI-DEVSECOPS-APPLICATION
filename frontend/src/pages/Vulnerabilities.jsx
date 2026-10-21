@@ -1,498 +1,488 @@
 import { useEffect, useMemo, useState } from "react";
-import API from "../api";
+import axios from "axios";
 
-export default function Vulnerabilities() {
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+const Vulnerabilities = () => {
   const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState("ALL");
-  const [fixFilter, setFixFilter] = useState("ALL");
-  const [selectedFinding, setSelectedFinding] = useState(null);
 
-  useEffect(() => {
-    fetchScans();
-  }, []);
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] =
+    useState("ALL");
+
+  
+const [scannerFilter, setScannerFilter] = useState("ALL");
+
+
+  const [selectedFinding, setSelectedFinding] =
+    useState(null);
+
+  const [error, setError] = useState("");
+
+  // =====================================================
+  // FETCH SCANS
+  // =====================================================
 
   const fetchScans = async () => {
     try {
-      const response = await API.get("/scans");
-      setScans(response.data || []);
+      setLoading(true);
+      setError("");
+
+      const response = await axios.get(
+        `${API}/scans`
+      );
+
+      /*
+       * Backend returns:
+       *
+       * {
+       *   message: "...",
+       *   data: [...]
+       * }
+       *
+       * Therefore extract response.data.data.
+       */
+
+      const scanData = Array.isArray(
+        response.data
+      )
+        ? response.data
+        : Array.isArray(response.data?.data)
+        ? response.data.data
+        : [];
+
+      setScans(scanData);
     } catch (error) {
       console.error(
         "Failed to fetch vulnerabilities:",
         error
+      );
+
+      setScans([]);
+
+      setError(
+        error.response?.data?.message ||
+          "Failed to load vulnerability data."
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // ======================================================
-  // GET LATEST SCAN
-  // ======================================================
+  // =====================================================
+  // INITIAL LOAD
+  // =====================================================
 
-  const latestScan = scans.length > 0 ? scans[0] : null;
+  useEffect(() => {
+    fetchScans();
+  }, []);
 
-  // ======================================================
-  // CONVERT FINDINGS
-  // ======================================================
+  // =====================================================
+  // LATEST SCAN PER REPOSITORY
+  // =====================================================
 
-  const vulnerabilities = useMemo(() => {
-    if (!latestScan) {
+
+const latestScans = useMemo(() => {
+  if (!Array.isArray(scans)) {
+    return [];
+  }
+
+  const latestMap = new Map();
+
+  scans
+    .filter((scan) => scan.status === "completed")
+    .forEach((scan) => {
+      const repoId =
+        scan.repoId?._id ||
+        scan.repoId ||
+        scan.repoName;
+
+      if (!repoId) {
+        return;
+      }
+
+      // Older records without a scanner field
+      // belong to the npm audit scanner.
+      const scanner = scan.scanner || "npm-audit";
+
+      // Keep one latest scan for each
+      // repository AND scanner combination.
+      const key = `${repoId}:${scanner}`;
+
+      const existing = latestMap.get(key);
+
+      if (
+        !existing ||
+        new Date(scan.createdAt) >
+          new Date(existing.createdAt)
+      ) {
+        latestMap.set(key, scan);
+      }
+    });
+
+  return Array.from(latestMap.values());
+}, [scans]);
+
+
+  // =====================================================
+  // FINDINGS FROM LATEST SCANS
+  // =====================================================
+
+  const allFindings = useMemo(() => {
+    if (!Array.isArray(latestScans)) {
       return [];
     }
 
-    return (latestScan.findings || []).map(
-      (finding, index) => ({
-        ...finding,
-
-        uniqueId:
-          finding._id ||
-          `${latestScan._id}-${index}`,
-
-        scanId: latestScan._id,
-
-        repositoryName:
-          latestScan.repoId?.repoName ||
-          latestScan.repository?.repoName ||
-          "Unknown Repository",
-
-        owner:
-          latestScan.repoId?.owner ||
-          "",
-
-        scanDate:
-          latestScan.createdAt,
-      })
-    );
-  }, [latestScan]);
-
-  // ======================================================
-  // VULNERABLE PACKAGE COUNT
-  // ======================================================
-
-  const vulnerablePackages = useMemo(() => {
-    const packages = new Set();
-
-    vulnerabilities.forEach(
-      (finding) => {
-        if (finding.packageName) {
-          packages.add(
-            `${finding.project || ""}:${finding.packageName}`
-          );
+    return latestScans.flatMap(
+      (scan) => {
+        if (
+          !Array.isArray(scan.findings)
+        ) {
+          return [];
         }
-      }
-    );
 
-    return packages.size;
-  }, [vulnerabilities]);
+        return scan.findings.map(
+          (finding) => ({
+            ...finding,
+            
+scanner: scan.scanner || "npm-audit",
 
-  // ======================================================
-  // ADVISORY COUNT
-  // ======================================================
 
-  const advisoryCount =
-    vulnerabilities.length;
+            repoName:
+              scan.repoName ||
+              scan.repoId?.repoName ||
+              "Unknown Repository",
 
-  // ======================================================
-  // SEVERITY COUNTS
-  // ======================================================
+            scanDate:
+              scan.createdAt,
 
-  const criticalCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.severity?.toUpperCase() ===
-        "CRITICAL"
-    ).length;
-
-  const highCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.severity?.toUpperCase() ===
-        "HIGH"
-    ).length;
-
-  const mediumCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.severity?.toUpperCase() ===
-        "MEDIUM"
-    ).length;
-
-  const lowCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.severity?.toUpperCase() ===
-        "LOW"
-    ).length;
-
-  // ======================================================
-  // FIX COUNTS
-  // ======================================================
-
-  const fixAvailableCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.fixAvailable === true
-    ).length;
-
-  const noFixCount =
-    vulnerabilities.filter(
-      (v) =>
-        v.fixAvailable !== true
-    ).length;
-
-  // ======================================================
-  // FILTER
-  // ======================================================
-
-  const filteredVulnerabilities =
-    vulnerabilities.filter(
-      (vulnerability) => {
-
-        const severityMatch =
-          filter === "ALL" ||
-          vulnerability.severity?.toUpperCase() ===
-            filter;
-
-        const fixMatch =
-          fixFilter === "ALL" ||
-          (fixFilter === "FIX" &&
-            vulnerability.fixAvailable === true) ||
-          (fixFilter === "NO_FIX" &&
-            vulnerability.fixAvailable !== true);
-
-        return (
-          severityMatch &&
-          fixMatch
+            scanId:
+              scan._id,
+          })
         );
       }
     );
+  }, [latestScans]);
 
-  // ======================================================
-  // SEVERITY STYLE
-  // ======================================================
+  // =====================================================
+  // FILTER FINDINGS
+  // =====================================================
+
+ 
+const filteredFindings = useMemo(() => {
+  const query = search.trim().toLowerCase();
+
+  return allFindings.filter((finding) => {
+    const matchesSearch =
+      !query ||
+      String(finding.packageName || "")
+        .toLowerCase()
+        .includes(query) ||
+      String(finding.title || "")
+        .toLowerCase()
+        .includes(query) ||
+      String(finding.cve || "")
+        .toLowerCase()
+        .includes(query) ||
+      String(finding.repoName || "")
+        .toLowerCase()
+        .includes(query);
+
+    const matchesSeverity =
+      severityFilter === "ALL" ||
+      finding.severity === severityFilter;
+
+    const matchesScanner =
+      scannerFilter === "ALL" ||
+      finding.scanner === scannerFilter;
+
+    return (
+      matchesSearch &&
+      matchesSeverity &&
+      matchesScanner
+    );
+  });
+}, [
+  allFindings,
+  search,
+  severityFilter,
+  scannerFilter,
+]);
+
+
+const filteredScanCount = useMemo(() => {
+  return latestScans.filter((scan) => {
+    return (
+      scannerFilter === "ALL" ||
+      (scan.scanner || "npm-audit") === scannerFilter
+    );
+  }).length;
+}, [latestScans, scannerFilter]);
+
+
+
+  // =====================================================
+  // STATISTICS
+  // =====================================================
+
+ 
+const stats = useMemo(() => {
+  const scannerFindings =
+    scannerFilter === "ALL"
+      ? allFindings
+      : allFindings.filter(
+          (finding) => finding.scanner === scannerFilter
+        );
+
+  return {
+    total: scannerFindings.length,
+    critical: scannerFindings.filter(
+      (finding) => finding.severity === "CRITICAL"
+    ).length,
+    high: scannerFindings.filter(
+      (finding) => finding.severity === "HIGH"
+    ).length,
+    medium: scannerFindings.filter(
+      (finding) => finding.severity === "MEDIUM"
+    ).length,
+    low: scannerFindings.filter(
+      (finding) => finding.severity === "LOW"
+    ).length,
+    unknown: scannerFindings.filter(
+      (finding) => finding.severity === "UNKNOWN"
+    ).length,
+  };
+}, [allFindings, scannerFilter]);
+
+  // =====================================================
+  // SEVERITY STYLING
+  // =====================================================
 
   const getSeverityClass = (
     severity
   ) => {
-    switch (
-      severity?.toUpperCase()
-    ) {
+    switch (severity) {
       case "CRITICAL":
-        return "bg-red-500/20 text-red-400 border-red-500/30";
+        return "bg-red-500/10 text-red-400 border-red-500/30";
 
       case "HIGH":
-        return "bg-orange-500/20 text-orange-400 border-orange-500/30";
+        return "bg-orange-500/10 text-orange-400 border-orange-500/30";
 
       case "MEDIUM":
-        return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
+        return "bg-yellow-500/10 text-yellow-400 border-yellow-500/30";
 
       case "LOW":
-        return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+        return "bg-blue-500/10 text-blue-400 border-blue-500/30";
 
       default:
-        return "bg-slate-500/20 text-slate-400 border-slate-500/30";
+        return "bg-slate-500/10 text-slate-400 border-slate-500/30";
     }
   };
 
-  // ======================================================
-  // DATE FORMAT
-  // ======================================================
+  // =====================================================
+  // LOADING
+  // =====================================================
 
-  const formatDate = (
-    date
-  ) => {
-    if (!date) {
-      return "N/A";
-    }
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white p-6">
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <div className="text-slate-400">
+            Loading vulnerabilities...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-    return new Date(
-      date
-    ).toLocaleString();
-  };
-
-  // ======================================================
-  // RENDER
-  // ======================================================
+  // =====================================================
+  // PAGE
+  // =====================================================
 
   return (
-    <div className="p-6 md:p-8 text-white">
+    <div className="min-h-screen bg-slate-950 text-white p-6">
 
-      {/* ==================================================
-          HEADER
-      ================================================== */}
+      {/* HEADER */}
 
       <div className="mb-8">
-
         <h1 className="text-3xl font-bold">
           Vulnerabilities
         </h1>
 
         <p className="text-slate-400 mt-2">
-          Real dependency vulnerabilities
-          detected using npm audit.
-        </p>
+          
+Security vulnerabilities detected by npm audit and Trivy
+across your connected repositories.
 
+        </p>
       </div>
 
+      {/* ERROR */}
 
-      {/* ==================================================
-          SECURITY OVERVIEW
-      ================================================== */}
+      {error && (
+        <div className="mb-6 bg-red-500/10 border border-red-500/30 text-red-300 rounded-lg p-4">
+          {error}
+        </div>
+      )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      {/* STAT CARDS */}
 
-        {/* Vulnerable Packages */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+
+        {/* TOTAL */}
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-
-          <p className="text-slate-400 text-sm">
-            Vulnerable Packages
+          <p className="text-sm text-slate-400">
+            Total Findings
           </p>
 
           <p className="text-3xl font-bold mt-2">
-            {vulnerablePackages}
+            {stats.total}
           </p>
-
-          <p className="text-xs text-slate-500 mt-1">
-            Unique packages
-          </p>
-
         </div>
 
-
-        {/* Security Advisories */}
-
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-
-          <p className="text-slate-400 text-sm">
-            Security Advisories
-          </p>
-
-          <p className="text-3xl font-bold mt-2">
-            {advisoryCount}
-          </p>
-
-          <p className="text-xs text-slate-500 mt-1">
-            Individual findings
-          </p>
-
-        </div>
-
-
-        {/* Fix Available */}
-
-        <div className="bg-slate-900 border border-green-500/20 rounded-xl p-5">
-
-          <p className="text-green-400 text-sm">
-            Fix Available
-          </p>
-
-          <p className="text-3xl font-bold mt-2 text-green-400">
-            {fixAvailableCount}
-          </p>
-
-          <p className="text-xs text-slate-500 mt-1">
-            Can be upgraded
-          </p>
-
-        </div>
-
-
-        {/* No Fix */}
+        {/* CRITICAL */}
 
         <div className="bg-slate-900 border border-red-500/20 rounded-xl p-5">
-
-          <p className="text-red-400 text-sm">
-            No Fix Available
-          </p>
-
-          <p className="text-3xl font-bold mt-2 text-red-400">
-            {noFixCount}
-          </p>
-
-          <p className="text-xs text-slate-500 mt-1">
-            Requires review
-          </p>
-
-        </div>
-
-      </div>
-
-
-      {/* ==================================================
-          SEVERITY SUMMARY
-      ================================================== */}
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-
-        <div className="bg-slate-900 border border-red-500/20 rounded-xl p-4">
-
-          <p className="text-red-400 text-sm">
+          <p className="text-sm text-red-400">
             Critical
           </p>
 
-          <p className="text-2xl font-bold mt-1">
-            {criticalCount}
+          <p className="text-3xl font-bold mt-2 text-red-400">
+            {stats.critical}
           </p>
-
         </div>
 
+        {/* HIGH */}
 
-        <div className="bg-slate-900 border border-orange-500/20 rounded-xl p-4">
-
-          <p className="text-orange-400 text-sm">
+        <div className="bg-slate-900 border border-orange-500/20 rounded-xl p-5">
+          <p className="text-sm text-orange-400">
             High
           </p>
 
-          <p className="text-2xl font-bold mt-1">
-            {highCount}
+          <p className="text-3xl font-bold mt-2 text-orange-400">
+            {stats.high}
           </p>
-
         </div>
 
+        {/* MEDIUM */}
 
-        <div className="bg-slate-900 border border-yellow-500/20 rounded-xl p-4">
-
-          <p className="text-yellow-400 text-sm">
+        <div className="bg-slate-900 border border-yellow-500/20 rounded-xl p-5">
+          <p className="text-sm text-yellow-400">
             Medium
           </p>
 
-          <p className="text-2xl font-bold mt-1">
-            {mediumCount}
+          <p className="text-3xl font-bold mt-2 text-yellow-400">
+            {stats.medium}
           </p>
-
         </div>
 
+        {/* LOW */}
 
-        <div className="bg-slate-900 border border-blue-500/20 rounded-xl p-4">
-
-          <p className="text-blue-400 text-sm">
+        <div className="bg-slate-900 border border-blue-500/20 rounded-xl p-5">
+          <p className="text-sm text-blue-400">
             Low
           </p>
 
-          <p className="text-2xl font-bold mt-1">
-            {lowCount}
+          <p className="text-3xl font-bold mt-2 text-blue-400">
+            {stats.low}
           </p>
-
         </div>
 
       </div>
 
+      {/* SEARCH + FILTER */}
 
-      {/* ==================================================
-          FILTERS
-      ================================================== */}
+      
+<div className="flex flex-wrap gap-3 mb-6">
+  {[
+    { label: "All Scanners", value: "ALL" },
+    { label: "npm audit", value: "npm-audit" },
+    { label: "Trivy", value: "trivy" },
+  ].map((scanner) => (
+    <button
+      key={scanner.value}
+      onClick={() => setScannerFilter(scanner.value)}
+      className={`px-5 py-2.5 rounded-lg border text-sm font-medium transition ${
+        scannerFilter === scanner.value
+          ? "bg-blue-600 border-blue-600 text-white"
+          : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+      }`}
+    >
+      {scanner.label}
+    </button>
+  ))}
+</div>
 
-      <div className="flex flex-wrap gap-3 mb-6">
 
-        {[
-          "ALL",
-          "CRITICAL",
-          "HIGH",
-          "MEDIUM",
-          "LOW",
-        ].map(
-          (severity) => (
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6">
 
-            <button
-              key={severity}
-              onClick={() =>
-                setFilter(
+        <div className="flex flex-col lg:flex-row gap-4">
+
+          <input
+            type="text"
+            placeholder="Search package, CVE, vulnerability or repository..."
+            value={search}
+            onChange={(e) =>
+              setSearch(e.target.value)
+            }
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 outline-none focus:border-blue-500"
+          />
+
+          <div className="flex flex-wrap gap-2">
+
+            {[
+              "ALL",
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+            ].map((severity) => (
+              <button
+                key={severity}
+                onClick={() =>
+                  setSeverityFilter(
+                    severity
+                  )
+                }
+                className={`px-4 py-2 rounded-lg border text-sm font-medium transition ${
+                  severityFilter ===
                   severity
-                )
-              }
-              className={`px-4 py-2 rounded-lg border text-sm font-medium transition ${
-                filter === severity
-                  ? "bg-blue-600 border-blue-600 text-white"
-                  : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {severity}
-            </button>
+                    ? "bg-blue-600 border-blue-600 text-white"
+                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                {severity}
+              </button>
+            ))}
 
-          )
-        )}
-
-
-        <div className="w-px bg-slate-700 mx-1" />
-
-
-        <button
-          onClick={() =>
-            setFixFilter(
-              "ALL"
-            )
-          }
-          className={`px-4 py-2 rounded-lg border text-sm font-medium ${
-            fixFilter === "ALL"
-              ? "bg-slate-700 border-slate-600 text-white"
-              : "bg-slate-900 border-slate-700 text-slate-300"
-          }`}
-        >
-          All Fix Status
-        </button>
-
-
-        <button
-          onClick={() =>
-            setFixFilter(
-              "FIX"
-            )
-          }
-          className={`px-4 py-2 rounded-lg border text-sm font-medium ${
-            fixFilter === "FIX"
-              ? "bg-green-600 border-green-600 text-white"
-              : "bg-slate-900 border-slate-700 text-slate-300"
-          }`}
-        >
-          Fix Available
-        </button>
-
-
-        <button
-          onClick={() =>
-            setFixFilter(
-              "NO_FIX"
-            )
-          }
-          className={`px-4 py-2 rounded-lg border text-sm font-medium ${
-            fixFilter === "NO_FIX"
-              ? "bg-red-600 border-red-600 text-white"
-              : "bg-slate-900 border-slate-700 text-slate-300"
-          }`}
-        >
-          No Fix
-        </button>
-
-      </div>
-
-
-      {/* ==================================================
-          LOADING
-      ================================================== */}
-
-      {loading && (
-
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center">
-
-          <p className="text-slate-400">
-            Loading vulnerabilities...
-          </p>
-
+          </div>
         </div>
 
-      )}
+        <div className="mt-4 text-sm text-slate-400">
+          Showing{" "}
+          <span className="text-white font-medium">
+            {filteredFindings.length}
+          </span>{" "}
+          vulnerabilities from{" "}
+          <span className="text-white font-medium">
+            {filteredScanCount}
+          </span>{" "}
+          latest repository scan
+          {latestScans.length !== 1
+            ? "s"
+            : ""}
+        </div>
+      </div>
 
+      {/* VULNERABILITY TABLE */}
 
-      {/* ==================================================
-          NO DATA
-      ================================================== */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
 
-      {!loading &&
-        vulnerabilities.length === 0 && (
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-10 text-center">
+        {filteredFindings.length ===
+        0 ? (
+          <div className="p-12 text-center">
 
             <div className="text-4xl mb-4">
               🛡️
@@ -503,296 +493,171 @@ export default function Vulnerabilities() {
             </h2>
 
             <p className="text-slate-400 mt-2">
-              Run a security scan to detect
-              dependency vulnerabilities.
+              No findings match your current
+              search or filter.
             </p>
 
           </div>
+        ) : (
+          <div className="overflow-x-auto">
 
-        )}
+            <table className="w-full">
 
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-sm text-slate-400">
 
-      {/* ==================================================
-          FILTERED EMPTY
-      ================================================== */}
+                  <th className="px-5 py-4">
+                    Severity
+                  </th>
 
-      {!loading &&
-        vulnerabilities.length > 0 &&
-        filteredVulnerabilities.length === 0 && (
+                  <th className="px-5 py-4">
+                    Package / Vulnerability
+                  </th>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-10 text-center">
+                  <th className="px-5 py-4">
+                    CVE / Advisory
+                  </th>
 
-            <h2 className="text-xl font-semibold">
-              No matching vulnerabilities
-            </h2>
+                  <th className="px-5 py-4">
+                    CVSS
+                  </th>
 
-            <p className="text-slate-400 mt-2">
-              Try changing your filters.
-            </p>
+                  <th className="px-5 py-4">
+                    Repository
+                  </th>
+
+                </tr>
+              </thead>
+
+              <tbody>
+
+                {filteredFindings.map(
+                  (finding, index) => (
+                    <tr
+                      key={
+                        finding._id ||
+                        `${finding.packageName}-${finding.cve}-${finding.advisory}-${index}`
+                      }
+                      onClick={() =>
+                        setSelectedFinding(
+                          finding
+                        )
+                      }
+                      className="border-b border-slate-800 hover:bg-slate-800/50 cursor-pointer transition"
+                    >
+
+                      {/* SEVERITY */}
+
+                      <td className="px-5 py-4">
+
+                        <span
+                          className={`inline-flex items-center px-2.5 py-1 rounded-full border text-xs font-semibold ${getSeverityClass(
+                            finding.severity
+                          )}`}
+                        >
+                          {finding.severity ||
+                            "UNKNOWN"}
+                        </span>
+
+                      </td>
+
+                      {/* PACKAGE */}
+
+                      <td className="px-5 py-4">
+
+                        <div className="font-medium text-white">
+                          {finding.packageName ||
+                            "Unknown package"}
+                        </div>
+
+                        <div className="text-sm text-slate-500 mt-1">
+                          {finding.title ||
+                            "Security vulnerability"}
+                        </div>
+
+                      </td>
+
+                      {/* CVE */}
+
+                      <td className="px-5 py-4">
+
+                        {finding.cve &&
+                        finding.cve !==
+                          "N/A" ? (
+                          <span className="text-blue-400">
+                            {finding.cve}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">
+                            No CVE
+                          </span>
+                        )}
+
+                      </td>
+
+                      {/* CVSS */}
+
+                      <td className="px-5 py-4">
+
+                        {typeof finding.score ===
+                          "number" &&
+                        finding.score > 0 ? (
+                          <span className="font-medium">
+                            {finding.score.toFixed(
+                              1
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">
+                            N/A
+                          </span>
+                        )}
+
+                      </td>
+
+                      {/* REPOSITORY */}
+
+                      <td className="px-5 py-4">
+
+                        <div className="text-white">
+                          {finding.repoName ||
+                            "Unknown"}
+                        </div>
+
+                        <div className="text-xs text-slate-500 mt-1">
+                          {finding.project ||
+                            "Project"}
+                        </div>
+
+                      </td>
+
+                    </tr>
+                  )
+                )}
+
+              </tbody>
+
+            </table>
 
           </div>
-
         )}
 
+      </div>
 
-      {/* ==================================================
-          VULNERABILITY TABLE
-      ================================================== */}
-
-      {!loading &&
-        filteredVulnerabilities.length > 0 && (
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-
-            <div className="px-6 py-4 border-b border-slate-800">
-
-              <h2 className="text-lg font-semibold">
-                Security Findings
-              </h2>
-
-              <p className="text-sm text-slate-400 mt-1">
-                {filteredVulnerabilities.length} finding
-                {filteredVulnerabilities.length !== 1
-                  ? "s"
-                  : ""}
-              </p>
-
-            </div>
-
-
-            <div className="overflow-x-auto">
-
-              <table className="w-full text-left">
-
-                <thead className="bg-slate-950">
-
-                  <tr>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Package
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Project
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Severity
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      CVSS
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Fix
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Advisory
-                    </th>
-
-                    <th className="px-6 py-4 text-sm text-slate-400">
-                      Action
-                    </th>
-
-                  </tr>
-
-                </thead>
-
-
-                <tbody>
-
-                  {filteredVulnerabilities.map(
-                    (vulnerability) => (
-
-                      <tr
-                        key={
-                          vulnerability.uniqueId
-                        }
-                        className="border-t border-slate-800 hover:bg-slate-800/40"
-                      >
-
-                        {/* PACKAGE */}
-
-                        <td className="px-6 py-4 min-w-[200px]">
-
-                          <p className="font-semibold text-white">
-                            {vulnerability.packageName ||
-                              "Unknown package"}
-                          </p>
-
-                          <p className="text-xs text-slate-500 mt-1">
-                            {vulnerability.title ||
-                              "Security vulnerability"}
-                          </p>
-
-                        </td>
-
-
-                        {/* PROJECT */}
-
-                        <td className="px-6 py-4">
-
-                          <p className="text-slate-200">
-                            {vulnerability.project ||
-                              "Unknown"}
-                          </p>
-
-                        </td>
-
-
-                        {/* SEVERITY */}
-
-                        <td className="px-6 py-4">
-
-                          <span
-                            className={`inline-flex px-3 py-1 rounded-full border text-xs font-semibold ${getSeverityClass(
-                              vulnerability.severity
-                            )}`}
-                          >
-                            {vulnerability.severity ||
-                              "UNKNOWN"}
-                          </span>
-
-                        </td>
-
-
-                        {/* CVSS */}
-
-                        <td className="px-6 py-4">
-
-                          <span className="font-semibold">
-                            {vulnerability.score ??
-                              "N/A"}
-                          </span>
-
-                        </td>
-
-
-                        {/* FIX */}
-
-                        <td className="px-6 py-4">
-
-                          {vulnerability.fixAvailable ? (
-
-                            <div>
-
-                              <span className="inline-flex px-3 py-1 rounded-full bg-green-500/20 text-green-400 border border-green-500/30 text-xs font-semibold">
-                                Available
-                              </span>
-
-                              {vulnerability.fixVersion &&
-                                vulnerability.fixVersion !==
-                                  "N/A" && (
-
-                                  <p className="text-xs text-slate-400 mt-1">
-                                    →{" "}
-                                    {
-                                      vulnerability.fixVersion
-                                    }
-                                  </p>
-
-                                )}
-
-                            </div>
-
-                          ) : (
-
-                            <span className="inline-flex px-3 py-1 rounded-full bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-semibold">
-                              No Fix
-                            </span>
-
-                          )}
-
-                        </td>
-
-
-                        {/* ADVISORY */}
-
-                        <td className="px-6 py-4">
-
-                          {vulnerability.advisory &&
-                          vulnerability.advisory !==
-                            "N/A" &&
-                          vulnerability.advisory.startsWith(
-                            "http"
-                          ) ? (
-
-                            <a
-                              href={
-                                vulnerability.advisory
-                              }
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-blue-400 hover:text-blue-300 text-sm"
-                            >
-                              View
-                            </a>
-
-                          ) : (
-
-                            <span className="text-slate-500 text-sm">
-                              N/A
-                            </span>
-
-                          )}
-
-                        </td>
-
-
-                        {/* ACTION */}
-
-                        <td className="px-6 py-4">
-
-                          <button
-                            onClick={() =>
-                              setSelectedFinding(
-                                vulnerability
-                              )
-                            }
-                            className="px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm text-blue-400"
-                          >
-                            Details
-                          </button>
-
-                        </td>
-
-                      </tr>
-
-                    )
-                  )}
-
-                </tbody>
-
-              </table>
-
-            </div>
-
-          </div>
-
-        )}
-
-
-      {/* ==================================================
-          DETAILS MODAL
-      ================================================== */}
+      {/* MODAL */}
 
       {selectedFinding && (
-
         <div
-          className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onClick={() =>
-            setSelectedFinding(
-              null
-            )
+            setSelectedFinding(null)
           }
         >
 
           <div
-            className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-2xl max-h-[85vh] overflow-y-auto"
-            onClick={(event) =>
-              event.stopPropagation()
+            className="w-full max-w-2xl max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl"
+            onClick={(e) =>
+              e.stopPropagation()
             }
           >
 
@@ -801,16 +666,13 @@ export default function Vulnerabilities() {
             <div className="flex items-center justify-between p-6 border-b border-slate-800">
 
               <div>
-
                 <h2 className="text-xl font-bold">
                   Vulnerability Details
                 </h2>
 
                 <p className="text-sm text-slate-400 mt-1">
-                  {selectedFinding.packageName ||
-                    "Unknown package"}
+                  {selectedFinding.packageName}
                 </p>
-
               </div>
 
               <button
@@ -826,264 +688,252 @@ export default function Vulnerabilities() {
 
             </div>
 
-
-            {/* MODAL CONTENT */}
+            {/* MODAL BODY */}
 
             <div className="p-6 space-y-6">
+
+              {/* SEVERITY + CVSS */}
+
+              <div className="flex flex-wrap gap-3">
+
+                <span
+                  className={`px-3 py-1.5 rounded-full border text-sm font-semibold ${getSeverityClass(
+                    selectedFinding.severity
+                  )}`}
+                >
+                  {selectedFinding.severity}
+                </span>
+
+                <span className="px-3 py-1.5 rounded-full bg-slate-800 text-slate-300 text-sm">
+                  CVSS:{" "}
+                  {typeof selectedFinding.score ===
+                    "number" &&
+                  selectedFinding.score > 0
+                    ? selectedFinding.score.toFixed(
+                        1
+                      )
+                    : "N/A"}
+                </span>
+
+              </div>
 
               {/* TITLE */}
 
               <div>
 
-                <p className="text-sm text-slate-400 mb-2">
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
                   Vulnerability
                 </p>
 
-                <p className="text-white font-medium">
+                <p className="text-white">
                   {selectedFinding.title ||
                     "Security vulnerability"}
                 </p>
 
               </div>
 
+              {/* CVE */}
 
-              {/* PACKAGE / PROJECT */}
+              <div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  CVE
+                </p>
 
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-sm text-slate-400">
-                    Package
-                  </p>
-
-                  <p className="font-semibold mt-2">
-                    {selectedFinding.packageName ||
-                      "N/A"}
-                  </p>
-
-                </div>
-
-
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-sm text-slate-400">
-                    Project
-                  </p>
-
-                  <p className="font-semibold mt-2">
-                    {selectedFinding.project ||
-                      "N/A"}
-                  </p>
-
-                </div>
+                <p className="text-white">
+                  {selectedFinding.cve &&
+                  selectedFinding.cve !==
+                    "N/A"
+                    ? selectedFinding.cve
+                    : "No CVE reported by npm audit"}
+                </p>
 
               </div>
 
+              {/* SOURCE */}
 
-              {/* SEVERITY / SCORE */}
+              <div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  Advisory Source
+                </p>
 
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-sm text-slate-400">
-                    Severity
-                  </p>
-
-                  <span
-                    className={`inline-flex mt-2 px-3 py-1 rounded-full border text-xs font-semibold ${getSeverityClass(
-                      selectedFinding.severity
-                    )}`}
-                  >
-                    {selectedFinding.severity ||
-                      "UNKNOWN"}
-                  </span>
-
-                </div>
-
-
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-sm text-slate-400">
-                    CVSS Score
-                  </p>
-
-                  <p className="text-xl font-bold mt-2">
-                    {selectedFinding.score ??
-                      "N/A"}
-                  </p>
-
-                </div>
+                <p className="text-white">
+                  {selectedFinding.source &&
+                  selectedFinding.source !==
+                    "N/A"
+                    ? selectedFinding.source
+                    : "N/A"}
+                </p>
 
               </div>
 
+              {/* CWE */}
+
+              {Array.isArray(
+                selectedFinding.cwe
+              ) &&
+                selectedFinding.cwe.length >
+                  0 && (
+                  <div>
+
+                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                      CWE
+                    </p>
+
+                    <div className="flex flex-wrap gap-2">
+
+                      {selectedFinding.cwe.map(
+                        (cwe) => (
+                          <span
+                            key={cwe}
+                            className="px-2.5 py-1 bg-slate-800 rounded-md text-sm text-slate-300"
+                          >
+                            {cwe}
+                          </span>
+                        )
+                      )}
+
+                    </div>
+
+                  </div>
+                )}
 
               {/* AFFECTED VERSION */}
 
               <div>
 
-                <p className="text-sm text-slate-400 mb-2">
-                  Affected Version
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  Affected Version / Range
                 </p>
 
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-slate-200">
-                    {selectedFinding.affectedVersion ||
-                      "N/A"}
-                  </p>
-
-                </div>
+                <code className="text-sm text-slate-300 bg-slate-800 px-3 py-2 rounded-lg inline-block">
+                  {selectedFinding.affectedVersion ||
+                    "N/A"}
+                </code>
 
               </div>
 
+              {/* REMEDIATION */}
 
-              {/* FIX */}
+              <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-4">
 
-              <div>
-
-                <p className="text-sm text-slate-400 mb-2">
-                  Fix Status
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  Remediation
                 </p>
 
-                <div className="bg-slate-950 rounded-lg p-4">
+                <p className="text-white">
+                  {selectedFinding.recommendation ||
+                    "No remediation information available."}
+                </p>
 
-                  {selectedFinding.fixAvailable ? (
+                <div className="mt-4 space-y-2 text-sm">
 
-                    <div>
+                  <div className="flex justify-between gap-4">
 
-                      <p className="text-green-400 font-semibold">
-                        Fix Available
-                      </p>
+                    <span className="text-slate-400">
+                      Fix available
+                    </span>
 
+                    <span
+                      className={
+                        selectedFinding.fixAvailable
+                          ? "text-green-400"
+                          : "text-red-400"
+                      }
+                    >
+                      {selectedFinding.fixAvailable
+                        ? "Yes"
+                        : "No"}
+                    </span>
+
+                  </div>
+
+                  <div className="flex justify-between gap-4">
+
+                    <span className="text-slate-400">
+                      Fix version
+                    </span>
+
+                    <span className="text-white">
                       {selectedFinding.fixVersion &&
-                        selectedFinding.fixVersion !==
-                          "N/A" && (
+                      selectedFinding.fixVersion !==
+                        "N/A"
+                        ? selectedFinding.fixVersion
+                        : "N/A"}
+                    </span>
 
-                          <p className="text-slate-300 mt-1">
-                            Recommended version:{" "}
-                            <span className="font-semibold">
-                              {
-                                selectedFinding.fixVersion
-                              }
-                            </span>
-                          </p>
+                  </div>
 
-                        )}
-
+                  {selectedFinding.fixIsMajor && (
+                    <div className="mt-3 text-yellow-300 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
+                      npm reports that this fix
+                      may introduce a SemVer-major
+                      or breaking change.
                     </div>
-
-                  ) : (
-
-                    <p className="text-red-400 font-semibold">
-                      No automatic fix available
-                    </p>
-
                   )}
 
                 </div>
 
               </div>
 
-
-              {/* CVE */}
-
-              <div>
-
-                <p className="text-sm text-slate-400 mb-2">
-                  CVE
-                </p>
-
-                <p className="text-slate-200 break-all">
-                  {selectedFinding.cve &&
-                  selectedFinding.cve !==
-                    "N/A"
-                    ? selectedFinding.cve
-                    : "N/A"}
-                </p>
-
-              </div>
-
-
               {/* ADVISORY */}
 
               <div>
 
-                <p className="text-sm text-slate-400 mb-2">
-                  Security Advisory
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  Advisory
                 </p>
 
                 {selectedFinding.advisory &&
-                selectedFinding.advisory !==
-                  "N/A" ? (
-
+                /^https?:\/\//i.test(
+                  selectedFinding.advisory
+                ) ? (
                   <a
                     href={
                       selectedFinding.advisory
                     }
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-400 hover:underline break-all"
+                    className="text-blue-400 hover:text-blue-300 break-all"
                   >
-                    {
-                      selectedFinding.advisory
-                    }
+                    {selectedFinding.advisory}
                   </a>
-
                 ) : (
-
                   <p className="text-slate-500">
-                    N/A
+                    No advisory URL reported by
+                    npm audit.
                   </p>
-
                 )}
 
               </div>
 
-
-              {/* RECOMMENDATION */}
-
-              <div>
-
-                <p className="text-sm text-slate-400 mb-2">
-                  Recommendation
-                </p>
-
-                <div className="bg-slate-950 rounded-lg p-4">
-
-                  <p className="text-slate-200">
-                    {selectedFinding.recommendation ||
-                      "Update the affected dependency to a secure version."}
-                  </p>
-
-                </div>
-
-              </div>
-
-
-              {/* DETECTED */}
+              {/* REPOSITORY */}
 
               <div>
 
-                <p className="text-sm text-slate-400 mb-2">
-                  Detected
+                <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                  Repository
                 </p>
 
-                <p className="text-slate-300">
-                  {formatDate(
-                    selectedFinding.scanDate
-                  )}
+                <p className="text-white">
+                  {selectedFinding.repoName ||
+                    "Unknown Repository"}
+                </p>
+
+                <p className="text-sm text-slate-500 mt-1">
+                  Project:{" "}
+                  {selectedFinding.project ||
+                    "N/A"}
                 </p>
 
               </div>
 
             </div>
 
-
             {/* MODAL FOOTER */}
 
-            <div className="px-6 py-4 border-t border-slate-800 flex justify-end">
+            <div className="p-6 border-t border-slate-800 flex justify-end">
 
               <button
                 onClick={() =>
@@ -1091,7 +941,7 @@ export default function Vulnerabilities() {
                     null
                   )
                 }
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg"
+                className="px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white"
               >
                 Close
               </button>
@@ -1101,9 +951,10 @@ export default function Vulnerabilities() {
           </div>
 
         </div>
-
       )}
 
     </div>
   );
-}
+};
+
+export default Vulnerabilities;

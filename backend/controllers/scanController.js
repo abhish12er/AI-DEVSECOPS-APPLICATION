@@ -13,9 +13,6 @@ const { exec } = require("child_process");
 
 const runCommand = (command, cwd) => {
   return new Promise((resolve, reject) => {
-    console.log(`Running command: ${command}`);
-    console.log(`Directory: ${cwd}`);
-
     exec(
       command,
       {
@@ -24,14 +21,12 @@ const runCommand = (command, cwd) => {
         maxBuffer: 20 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
-        if (stdout) {
-          console.log("Command stdout:");
-          console.log(stdout);
-        }
+        console.log(`\nCommand: ${command}`);
+        console.log(`stdout length: ${stdout?.length || 0}`);
+        console.log(`stderr length: ${stderr?.length || 0}`);
 
         if (stderr) {
-          console.log("Command stderr:");
-          console.log(stderr);
+          console.log("stderr:", stderr.substring(0, 1000));
         }
 
         if (error) {
@@ -51,200 +46,93 @@ const runCommand = (command, cwd) => {
 // ======================================================
 
 const runNpmAudit = async (repoPath) => {
-  console.log("----------------------------------------");
-  console.log(`Starting npm audit in: ${repoPath}`);
+  const packageLockPath = path.join(repoPath, "package-lock.json");
 
   try {
-    // --------------------------------------------------
-    // CHECK FOR PACKAGE LOCK
-    // --------------------------------------------------
+    // npm audit needs package-lock.json
+    if (!fs.existsSync(packageLockPath)) {
+      console.log("package-lock.json not found.");
+      console.log("Generating package-lock.json...");
 
-    const lockFile = path.join(
-      repoPath,
-      "package-lock.json"
-    );
-
-    if (!fs.existsSync(lockFile)) {
-      console.log(
-        "package-lock.json not found."
-      );
-
-      console.log(
-        "Generating package-lock.json..."
-      );
-
-      try {
-        await runCommand(
-          "npm.cmd install --package-lock-only --ignore-scripts",
-          repoPath
-        );
-
-        console.log(
-          "package-lock.json generated successfully."
-        );
-      } catch (installError) {
-        console.error(
-          "Failed to generate package-lock.json:"
-        );
-
-        console.error(
-          installError.message
-        );
-
-        throw new Error(
-          "Could not generate package-lock.json"
-        );
-      }
-    } else {
-      console.log(
-        "package-lock.json already exists."
+      await runCommand(
+        "npm.cmd install --package-lock-only --ignore-scripts",
+        repoPath
       );
     }
 
+    console.log("Running npm audit...");
 
-    // --------------------------------------------------
-    // RUN NPM AUDIT
-    // --------------------------------------------------
+    return await new Promise((resolve, reject) => {
+      exec(
+        "npm.cmd audit --json",
+        {
+          cwd: repoPath,
+          shell: true,
+          maxBuffer: 20 * 1024 * 1024,
+        },
+        (error, stdout, stderr) => {
+          /*
+           * npm audit returns a non-zero exit code when
+           * vulnerabilities are found.
+           *
+           * Therefore, we DO NOT treat every error as
+           * a failed scan.
+           */
 
-    console.log(
-      "Running npm audit..."
-    );
+          if (!stdout) {
+            console.error("npm audit produced no stdout.");
+            console.error(stderr);
 
-    return await new Promise(
-      (resolve, reject) => {
-
-        exec(
-          "npm.cmd audit --json",
-          {
-            cwd: repoPath,
-            shell: true,
-            maxBuffer: 20 * 1024 * 1024,
-          },
-
-          (error, stdout, stderr) => {
-
-            console.log(
-              `npm audit finished in: ${repoPath}`
+            reject(
+              new Error("npm audit did not return any JSON output.")
             );
 
-            console.log(
-              "Exit error:",
-              error?.message || "none"
-            );
+            return;
+          }
 
-            if (stderr) {
-              console.log(
-                "npm audit stderr:"
-              );
+          try {
+            const auditData = JSON.parse(stdout);
 
-              console.log(stderr);
-            }
-
-            console.log(
-              "npm audit stdout length:",
-              stdout?.length || 0
-            );
-
-
-            // ------------------------------------------------
-            // NO OUTPUT
-            // ------------------------------------------------
-
-            if (
-              !stdout ||
-              !stdout.trim()
-            ) {
+            // npm may return an error object instead of
+            // normal audit data
+            if (auditData.error) {
               reject(
                 new Error(
-                  stderr?.trim() ||
-                  error?.message ||
-                  "npm audit returned no output"
+                  auditData.error.summary ||
+                    auditData.error.detail ||
+                    "npm audit returned an error."
                 )
               );
 
               return;
             }
 
+            resolve(auditData);
+          } catch (parseError) {
+            console.error("Failed to parse npm audit JSON.");
+            console.error(stdout.substring(0, 2000));
 
-            // ------------------------------------------------
-            // PARSE JSON
-            // ------------------------------------------------
-
-            try {
-
-              const result =
-                JSON.parse(stdout);
-
-
-              // npm may return an error object
-              // instead of actual audit results.
-
-              if (
-                result.error &&
-                result.error.code
-              ) {
-                reject(
-                  new Error(
-                    result.error.summary ||
-                    result.error.detail ||
-                    result.error.code
-                  )
-                );
-
-                return;
-              }
-
-
-              console.log(
-                "npm audit JSON parsed successfully"
-              );
-
-              resolve(result);
-
-            } catch (parseError) {
-
-              console.error(
-                "Unable to parse npm audit JSON."
-              );
-
-              console.error(
-                "Raw output:"
-              );
-
-              console.error(stdout);
-
-              reject(
-                new Error(
-                  "Unable to parse npm audit results"
-                )
-              );
-            }
+            reject(
+              new Error("Invalid JSON returned by npm audit.")
+            );
           }
-        );
-      }
-    );
-
+        }
+      );
+    });
   } catch (error) {
-
-    console.error(
-      `npm audit failed in ${repoPath}:`,
-      error.message
-    );
-
     throw error;
   }
 };
 
 
 // ======================================================
-// FIND PACKAGE.JSON FILES
+// FIND ALL PACKAGE.JSON FILES
 // ======================================================
 
 const findPackageJsonFiles = (directory) => {
+  const packagePaths = [];
 
-  const packageDirectories = [];
-
-  const ignoredFolders = new Set([
+  const ignoredDirectories = new Set([
     "node_modules",
     ".git",
     "dist",
@@ -254,24 +142,14 @@ const findPackageJsonFiles = (directory) => {
     "coverage",
   ]);
 
-
-  const scanDirectory = (
-    currentDirectory
-  ) => {
-
+  const scanDirectory = (currentDirectory) => {
     let entries;
 
     try {
-
-      entries = fs.readdirSync(
-        currentDirectory,
-        {
-          withFileTypes: true,
-        }
-      );
-
+      entries = fs.readdirSync(currentDirectory, {
+        withFileTypes: true,
+      });
     } catch (error) {
-
       console.error(
         `Unable to read directory ${currentDirectory}:`,
         error.message
@@ -280,52 +158,164 @@ const findPackageJsonFiles = (directory) => {
       return;
     }
 
-
     for (const entry of entries) {
-
       const fullPath = path.join(
         currentDirectory,
         entry.name
       );
 
-
       if (entry.isDirectory()) {
-
-        if (
-          ignoredFolders.has(
-            entry.name
-          )
-        ) {
-          continue;
+        if (!ignoredDirectories.has(entry.name)) {
+          scanDirectory(fullPath);
         }
-
-        scanDirectory(fullPath);
-      }
-
-
-      if (
+      } else if (
         entry.isFile() &&
-        entry.name.toLowerCase() ===
-          "package.json"
+        entry.name === "package.json"
       ) {
-
-        packageDirectories.push(
-          path.dirname(fullPath)
-        );
+        packagePaths.push(fullPath);
       }
     }
   };
 
-
   scanDirectory(directory);
 
-  return packageDirectories;
+  return packagePaths;
 };
 
 
+// ======================================================
+// MAP NPM SEVERITY
+// ======================================================
+
+const mapSeverity = (severity) => {
+  switch ((severity || "").toLowerCase()) {
+    case "critical":
+      return "CRITICAL";
+
+    case "high":
+      return "HIGH";
+
+    case "moderate":
+    case "medium":
+      return "MEDIUM";
+
+    case "low":
+      return "LOW";
+
+    default:
+      return "LOW";
+  }
+};
+
 
 // ======================================================
-// CONVERT AUDIT RESULTS
+// GET FIX INFORMATION
+// ======================================================
+
+const getFixInformation = (fixAvailable) => {
+  let hasFix = false;
+  let fixVersion = "N/A";
+  let fixIsMajor = false;
+
+  if (fixAvailable === true) {
+    hasFix = true;
+  }
+
+  if (
+    fixAvailable &&
+    typeof fixAvailable === "object"
+  ) {
+    hasFix = true;
+
+    if (fixAvailable.version) {
+      fixVersion = String(fixAvailable.version);
+    }
+
+    if (fixAvailable.isSemVerMajor === true) {
+      fixIsMajor = true;
+    }
+  }
+
+  return {
+    hasFix,
+    fixVersion,
+    fixIsMajor,
+  };
+};
+
+
+// ======================================================
+// CREATE REMEDIATION MESSAGE
+// ======================================================
+
+const createRecommendation = ({
+  packageName,
+  hasFix,
+  fixVersion,
+  fixIsMajor,
+}) => {
+  if (hasFix && fixVersion !== "N/A") {
+    if (fixIsMajor) {
+      return `Upgrade ${packageName} to ${fixVersion}. npm reports that this fix may introduce a breaking change.`;
+    }
+
+    return `Upgrade ${packageName} to ${fixVersion} or later.`;
+  }
+
+  if (hasFix) {
+    return `npm audit reports that a fix is available for ${packageName}. Upgrade to a secure version.`;
+  }
+
+  return `No automatic fix is currently reported by npm audit. Review the advisory and consider upgrading, replacing, or removing the dependency.`;
+};
+
+
+// ======================================================
+// GET ADVISORY IDENTIFIER
+// ======================================================
+
+const getAdvisoryIdentifier = (
+  advisory,
+  packageName,
+  vulnerability
+) => {
+  /*
+   * Prefer npm's advisory source ID.
+   */
+
+  if (advisory?.source) {
+    return `source:${advisory.source}`;
+  }
+
+  /*
+   * Otherwise use CVE.
+   */
+
+  if (advisory?.cve) {
+    return `cve:${advisory.cve}`;
+  }
+
+  /*
+   * Otherwise use advisory URL.
+   */
+
+  if (advisory?.url) {
+    return `url:${advisory.url}`;
+  }
+
+  /*
+   * Last fallback for advisory objects that do not
+   * contain source/CVE/URL.
+   */
+
+  return `title:${advisory?.title || "unknown"}|range:${
+    advisory?.range || vulnerability?.range || "N/A"
+  }|package:${packageName}`;
+};
+
+
+// ======================================================
+// CONVERT NPM AUDIT RESULTS
 // ======================================================
 
 const convertAuditResults = (
@@ -334,407 +324,317 @@ const convertAuditResults = (
 ) => {
   const findings = [];
 
-  if (
-    !auditData ||
-    !auditData.vulnerabilities
-  ) {
-    return findings;
-  }
-
   const vulnerabilities =
-    auditData.vulnerabilities;
+    auditData?.vulnerabilities || {};
 
-  Object.entries(
-    vulnerabilities
-  ).forEach(
-    ([packageName, vulnerability]) => {
+  const projectName =
+    path.basename(projectPath);
 
-      // --------------------------------------------------
-      // SEVERITY
-      // --------------------------------------------------
+  /*
+   * Prevent duplicate advisory records inside
+   * the same project.
+   */
 
-      let severity = "LOW";
+  const seenFindings = new Set();
 
-      const npmSeverity =
-        vulnerability.severity?.toLowerCase();
+  for (const [
+    packageName,
+    vulnerability,
+  ] of Object.entries(vulnerabilities)) {
+    const severity = mapSeverity(
+      vulnerability.severity
+    );
 
-      if (npmSeverity === "critical") {
-        severity = "CRITICAL";
-      } else if (npmSeverity === "high") {
-        severity = "HIGH";
-      } else if (
-        npmSeverity === "moderate" ||
-        npmSeverity === "medium"
-      ) {
-        severity = "MEDIUM";
-      } else if (npmSeverity === "low") {
-        severity = "LOW";
-      }
+    const affectedVersion =
+      vulnerability.range || "N/A";
 
+    const {
+      hasFix,
+      fixVersion,
+      fixIsMajor,
+    } = getFixInformation(
+      vulnerability.fixAvailable
+    );
 
-      // --------------------------------------------------
-      // PROJECT NAME
-      // --------------------------------------------------
+    const via = Array.isArray(
+      vulnerability.via
+    )
+      ? vulnerability.via
+      : [];
 
-      const projectName =
-        path.basename(projectPath);
+    /*
+     * npm's "via" can contain:
+     *
+     * 1. Advisory objects
+     * 2. Strings representing dependency causes
+     *
+     * We only create security findings from
+     * actual advisory objects.
+     */
 
+    const advisories = via.filter(
+      (item) =>
+        item &&
+        typeof item === "object"
+    );
 
-      // --------------------------------------------------
-      // FIX INFORMATION
-      // --------------------------------------------------
+    // ==================================================
+    // REAL ADVISORY OBJECTS
+    // ==================================================
 
-      const fixAvailable =
-        vulnerability.fixAvailable;
+    if (advisories.length > 0) {
+      for (const advisory of advisories) {
+        const advisoryId =
+          getAdvisoryIdentifier(
+            advisory,
+            packageName,
+            vulnerability
+          );
 
-      let hasFix = false;
-      let fixVersion = "N/A";
+        /*
+         * Include project so that the same advisory
+         * in two separate projects is not incorrectly
+         * merged.
+         */
 
-      if (
-        fixAvailable === true
-      ) {
-        hasFix = true;
-      }
+        const findingKey =
+          `${projectName}|${packageName}|${advisoryId}`;
 
-      if (
-        typeof fixAvailable === "object" &&
-        fixAvailable !== null
-      ) {
-        hasFix = true;
-
-        if (
-          fixAvailable.version
-        ) {
-          fixVersion =
-            fixAvailable.version;
+        if (seenFindings.has(findingKey)) {
+          continue;
         }
-      }
 
+        seenFindings.add(findingKey);
 
-      // --------------------------------------------------
-      // VULNERABLE VERSION
-      // --------------------------------------------------
+        const advisoryUrl =
+          advisory.url || "N/A";
 
-      const affectedVersion =
-        vulnerability.range ||
-        "N/A";
+        const cve =
+          advisory.cve || "N/A";
 
+        const score =
+          advisory.cvss?.score ??
+          vulnerability.cvss?.score ??
+          0;
 
-      // --------------------------------------------------
-      // VIA / ADVISORIES
-      // --------------------------------------------------
+        const title =
+          advisory.title ||
+          `${packageName} has a security vulnerability`;
 
-      const via =
-        Array.isArray(
-          vulnerability.via
+        const source =
+          advisory.source
+            ? String(advisory.source)
+            : "N/A";
+
+        const cwe = Array.isArray(
+          advisory.cwe
         )
-          ? vulnerability.via
+          ? advisory.cwe.map(String)
           : [];
 
-
-      const advisories =
-        via.filter(
-          (item) =>
-            typeof item === "object" &&
-            item !== null
-        );
-
-
-      // --------------------------------------------------
-      // CREATE FINDINGS
-      // --------------------------------------------------
-
-      if (
-        advisories.length > 0
-      ) {
-
-        advisories.forEach(
-          (advisory) => {
-
-            const advisoryUrl =
-              advisory.url ||
-              "N/A";
-
-            const cve =
-              advisory.cve ||
-              "N/A";
-
-            const score =
-              advisory.cvss?.score ??
-              vulnerability.cvss?.score ??
-              0;
-
-            const title =
-              advisory.title ||
-              `${packageName} has a security vulnerability`;
-
-            let recommendation =
-              `Update ${packageName} to a secure version.`;
-
-            if (
-              hasFix &&
-              fixVersion !== "N/A"
-            ) {
-              recommendation =
-                `Update ${packageName} to version ${fixVersion} or later.`;
-            } else if (
-              hasFix
-            ) {
-              recommendation =
-                `Update ${packageName} to the latest secure version.`;
-            }
-
-            findings.push({
-              packageName,
-
-              project:
-                projectName,
-
-              title,
-
-              severity,
-
-              cve,
-
-              advisory:
-                advisoryUrl,
-
-              score,
-
-              affectedVersion,
-
-              fixAvailable:
-                hasFix,
-
-              fixVersion,
-
-              recommendation,
-            });
-          }
-        );
-
-
-      // --------------------------------------------------
-      // FALLBACK WHEN NO ADVISORY OBJECT EXISTS
-      // --------------------------------------------------
-
-      } else {
-
-        let recommendation =
-          `Update ${packageName} to a secure version.`;
-
-        if (
-          hasFix &&
-          fixVersion !== "N/A"
-        ) {
-          recommendation =
-            `Update ${packageName} to version ${fixVersion} or later.`;
-        } else if (
-          hasFix
-        ) {
-          recommendation =
-            `Update ${packageName} to the latest secure version.`;
-        }
+        const recommendation =
+          createRecommendation({
+            packageName,
+            hasFix,
+            fixVersion,
+            fixIsMajor,
+          });
 
         findings.push({
           packageName,
 
-          project:
-            projectName,
+          project: projectName,
 
-          title:
-            `${packageName} has a security vulnerability`,
+          title,
 
           severity,
 
-          cve: "N/A",
+          cve,
 
-          advisory: "N/A",
+          advisory: advisoryUrl,
 
-          score:
-            vulnerability.cvss?.score ??
-            0,
+          source,
+
+          cwe,
+
+          score,
 
           affectedVersion,
 
-          fixAvailable:
-            hasFix,
+          fixAvailable: hasFix,
 
           fixVersion,
+
+          fixIsMajor,
 
           recommendation,
         });
       }
     }
-  );
+
+    // ==================================================
+    // FALLBACK
+    // ==================================================
+
+    /*
+     * Sometimes npm reports a vulnerable package
+     * without an advisory object.
+     *
+     * We still keep the vulnerability because it
+     * came from npm audit, but we do NOT invent
+     * a CVE or advisory URL.
+     */
+
+    else {
+      const fallbackKey =
+        `${projectName}|${packageName}|${affectedVersion}`;
+
+      if (seenFindings.has(fallbackKey)) {
+        continue;
+      }
+
+      seenFindings.add(fallbackKey);
+
+      const score =
+        vulnerability.cvss?.score ?? 0;
+
+      findings.push({
+        packageName,
+
+        project: projectName,
+
+        title: `${packageName} has a security vulnerability`,
+
+        severity,
+
+        cve: "N/A",
+
+        advisory: "N/A",
+
+        source: "N/A",
+
+        cwe: [],
+
+        score,
+
+        affectedVersion,
+
+        fixAvailable: hasFix,
+
+        fixVersion,
+
+        fixIsMajor,
+
+        recommendation:
+          createRecommendation({
+            packageName,
+            hasFix,
+            fixVersion,
+            fixIsMajor,
+          }),
+      });
+    }
+  }
 
   return findings;
 };
-
-
 
 
 // ======================================================
 // RUN SECURITY SCAN
 // ======================================================
 
-const runScan = async (
-  req,
-  res
-) => {
+const runScan = async (req, res) => {
+  const { repoId } = req.body;
 
-  let tempDir = null;
+  if (!repoId) {
+    return res.status(400).json({
+      message: "repoId is required",
+    });
+  }
 
+  let tempDir;
 
   try {
-
-    const { repoId } =
-      req.body;
-
-
-    console.log(
-      "========================================"
-    );
-
-    console.log(
-      "Starting security scan for:",
-      repoId
-    );
-
-    console.log(
-      "========================================"
-    );
-
-
-    // --------------------------------------------------
-    // VALIDATE REPO ID
-    // --------------------------------------------------
-
-    if (!repoId) {
-
-      return res.status(400).json({
-        message:
-          "repoId is required",
-      });
-    }
-
-
-    // --------------------------------------------------
-    // FIND REPOSITORY
-    // --------------------------------------------------
+    // ================================================
+    // GET REPOSITORY
+    // ================================================
 
     const repository =
-      await Repository.findById(
-        repoId
-      );
-
+      await Repository.findById(repoId);
 
     if (!repository) {
-
       return res.status(404).json({
-        message:
-          "Repository not found",
+        message: "Repository not found",
       });
     }
 
-
-    console.log(
-      "Repository:",
-      repository.repoUrl
-    );
-
-
-    // --------------------------------------------------
+    // ================================================
     // CREATE TEMP DIRECTORY
-    // --------------------------------------------------
+    // ================================================
 
-    tempDir =
-      fs.mkdtempSync(
-        path.join(
-          os.tmpdir(),
-          "devsecops-"
-        )
-      );
-
-
-    console.log(
-      "Cloning repository into:",
-      tempDir
+    tempDir = path.join(
+      os.tmpdir(),
+      `devsecops-scan-${Date.now()}`
     );
 
+    console.log("\n=================================");
+    console.log("STARTING SECURITY SCAN");
+    console.log("Repository:", repository.repoUrl);
+    console.log("Temp directory:", tempDir);
+    console.log("=================================\n");
 
-    // --------------------------------------------------
+    // ================================================
     // CLONE REPOSITORY
-    // --------------------------------------------------
+    // ================================================
 
-    const git =
-      simpleGit();
-
-
-    await git.clone(
+    await simpleGit().clone(
       repository.repoUrl,
       tempDir
     );
 
+    console.log("Repository cloned successfully.");
+
+
+    // ================================================
+    // FIND PROJECTS
+    // ================================================
+
+    const packageJsonFiles =
+      findPackageJsonFiles(tempDir);
 
     console.log(
-      "Repository cloned successfully"
+      `Found ${packageJsonFiles.length} package.json file(s).`
     );
 
-
-    // --------------------------------------------------
-    // FIND PACKAGE.JSON FILES
-    // --------------------------------------------------
-
-    const packageDirectories =
-      findPackageJsonFiles(
-        tempDir
-      );
-
-
-    console.log(
-      "Found package.json files:",
-      packageDirectories
-    );
-
-
-    // --------------------------------------------------
+    // ================================================
     // NO NODE PROJECT
-    // --------------------------------------------------
+    // ================================================
 
-    if (
-      packageDirectories.length ===
-      0
-    ) {
+    if (packageJsonFiles.length === 0) {
+      const scan = await Scan.create({
+        repoId: repository._id,
 
-      const scan =
-        await Scan.create({
+        repoName:
+          repository.repoName,
 
-          repoId:
-            repository._id,
+        status: "completed",
 
-          status:
-            "completed",
-
-          findings: [],
-        });
-
+        findings: [],
+      });
 
       return res.status(200).json({
-
         message:
-          "Scan completed. No Node.js projects found.",
+          "Scan completed. No package.json files found.",
 
-        scan,
-
-        vulnerabilities: 0,
+        data: scan,
       });
     }
 
 
-    // --------------------------------------------------
-    // RUN AUDITS
-    // --------------------------------------------------
+    // ================================================
+    // RUN AUDIT FOR EACH PROJECT
+    // ================================================
 
     let allFindings = [];
 
@@ -742,55 +642,43 @@ const runScan = async (
 
     let failedAudits = 0;
 
-
-    for (
-      const projectPath of
-        packageDirectories
-    ) {
+    for (const packageJsonPath of packageJsonFiles) {
+      const projectPath =
+        path.dirname(packageJsonPath);
 
       console.log(
-        "----------------------------------------"
+        "\n---------------------------------"
       );
 
       console.log(
-        "Running npm audit in:",
+        "Scanning project:",
         projectPath
       );
 
+      console.log(
+        "---------------------------------\n"
+      );
 
       try {
-
-        const auditResult =
-          await runNpmAudit(
-            projectPath
-          );
-
+        const auditData =
+          await runNpmAudit(projectPath);
 
         const findings =
           convertAuditResults(
-            auditResult,
+            auditData,
             projectPath
           );
 
-
         allFindings =
-          allFindings.concat(
-            findings
-          );
-
+          allFindings.concat(findings);
 
         successfulAudits++;
 
-
         console.log(
-          `Found ${findings.length} vulnerabilities in ${projectPath}`
+          `Audit completed. Findings: ${findings.length}`
         );
-
-
       } catch (error) {
-
         failedAudits++;
-
 
         console.error(
           `Audit failed for ${projectPath}:`,
@@ -800,190 +688,135 @@ const runScan = async (
     }
 
 
-    // --------------------------------------------------
-    // SUMMARY
-    // --------------------------------------------------
-
-    console.log(
-      "========================================"
-    );
-
-    console.log(
-      "Scan Summary"
-    );
-
-    console.log(
-      "Successful audits:",
-      successfulAudits
-    );
-
-    console.log(
-      "Failed audits:",
-      failedAudits
-    );
-
-    console.log(
-      "Total vulnerabilities found:",
-      allFindings.length
-    );
-
-    console.log(
-      "========================================"
-    );
-
-
-    // --------------------------------------------------
+    // ================================================
     // ALL AUDITS FAILED
-    // --------------------------------------------------
+    // ================================================
 
     if (
       successfulAudits === 0 &&
       failedAudits > 0
     ) {
-
       const failedScan =
         await Scan.create({
+          repoId: repository._id,
 
-          repoId:
-            repository._id,
+          repoName:
+            repository.repoName,
 
-          status:
-            "failed",
+          status: "failed",
 
           findings: [],
         });
 
-
       return res.status(500).json({
-
         message:
-          "Security scan failed. npm audit could not run successfully.",
+          "Security scan failed for all detected projects.",
 
-        scan:
-          failedScan,
+        data: failedScan,
       });
     }
 
 
-    // --------------------------------------------------
-    // SAVE COMPLETED SCAN
-    // --------------------------------------------------
+    // ================================================
+    // SAVE SCAN
+    // ================================================
 
     const scan =
       await Scan.create({
+        repoId: repository._id,
 
-        repoId:
-          repository._id,
+        repoName:
+          repository.repoName,
 
-        status:
-          "completed",
+        status: "completed",
 
-        findings:
-          allFindings,
+        findings: allFindings,
       });
 
 
-    console.log(
-      "Scan saved successfully:",
-      scan._id
-    );
+    // ================================================
+    // RESULT SUMMARY
+    // ================================================
 
-
-    // --------------------------------------------------
-    // RESPONSE
-    // --------------------------------------------------
-
-    return res.status(200).json({
-
-      message:
-        "Security scan completed successfully",
-
-      scan,
-
-      vulnerabilities:
+    const summary = {
+      totalFindings:
         allFindings.length,
 
-      successfulAudits,
+      critical:
+        allFindings.filter(
+          (f) => f.severity === "CRITICAL"
+        ).length,
 
-      failedAudits,
+      high:
+        allFindings.filter(
+          (f) => f.severity === "HIGH"
+        ).length,
+
+      medium:
+        allFindings.filter(
+          (f) => f.severity === "MEDIUM"
+        ).length,
+
+      low:
+        allFindings.filter(
+          (f) => f.severity === "LOW"
+        ).length,
+
+      projectsScanned:
+        successfulAudits,
+
+      projectsFailed:
+        failedAudits,
+    };
+
+
+    console.log("\n=================================");
+    console.log("SCAN COMPLETED");
+    console.log("Summary:", summary);
+    console.log("=================================\n");
+
+
+    return res.status(200).json({
+      message: "Security scan completed successfully.",
+
+      data: scan,
+
+      summary,
     });
-
-
   } catch (error) {
-
     console.error(
-      "SCAN ERROR:",
+      "Security scan error:",
       error
     );
 
-
-    // --------------------------------------------------
-    // SAVE FAILED SCAN
-    // --------------------------------------------------
-
-    try {
-
-      if (
-        req.body?.repoId
-      ) {
-
-        await Scan.create({
-
-          repoId:
-            req.body.repoId,
-
-          status:
-            "failed",
-
-          findings: [],
-        });
-      }
-
-    } catch (dbError) {
-
-      console.error(
-        "Failed to save failed scan:",
-        dbError.message
-      );
-    }
-
-
     return res.status(500).json({
-
       message:
-        error.message ||
-        "Security scan failed",
+        "Security scan failed.",
+
+      error:
+        error.message,
     });
-
-
   } finally {
+    // ================================================
+    // CLEAN TEMP DIRECTORY
+    // ================================================
 
-    // --------------------------------------------------
-    // DELETE TEMP DIRECTORY
-    // --------------------------------------------------
-
-    if (tempDir) {
-
+    if (
+      tempDir &&
+      fs.existsSync(tempDir)
+    ) {
       try {
-
-        fs.rmSync(
-          tempDir,
-          {
-            recursive: true,
-            force: true,
-          }
-        );
-
+        fs.rmSync(tempDir, {
+          recursive: true,
+          force: true,
+        });
 
         console.log(
-          "Temporary repository removed"
+          "Temporary scan directory removed."
         );
-
-
       } catch (cleanupError) {
-
         console.error(
-          "Failed to remove temporary repository:",
+          "Failed to remove temp directory:",
           cleanupError.message
         );
       }
@@ -993,16 +826,11 @@ const runScan = async (
 
 
 // ======================================================
-// GET SCANS
+// GET ALL SCANS
 // ======================================================
 
-const getScans = async (
-  req,
-  res
-) => {
-
+const getScans = async (req, res) => {
   try {
-
     const scans =
       await Scan.find()
         .populate({
@@ -1013,24 +841,23 @@ const getScans = async (
           createdAt: -1,
         });
 
+    return res.status(200).json({
+      message: "Scans fetched successfully.",
 
-    return res.status(200).json(
-      scans
-    );
-
-
+      data: scans,
+    });
   } catch (error) {
-
     console.error(
-      "GET SCANS ERROR:",
+      "Get scans error:",
       error
     );
 
-
     return res.status(500).json({
-
       message:
-        "Failed to fetch scans",
+        "Failed to fetch scans.",
+
+      error:
+        error.message,
     });
   }
 };
@@ -1040,172 +867,140 @@ const getScans = async (
 // SECURITY ANALYSIS
 // ======================================================
 
-const analyzeSecurity = async (
-  req,
-  res
-) => {
-
+const analyzeSecurity = async (req, res) => {
   try {
-
     const scans =
-      await Scan.find()
+      await Scan.find({
+        status: "completed",
+      })
         .sort({
           createdAt: -1,
         });
 
+    /*
+     * Keep only the latest completed scan
+     * for each repository.
+     */
 
-    if (
-      scans.length === 0
-    ) {
+    const latestScansByRepo =
+      new Map();
 
-      return res.status(200).json({
+    for (const scan of scans) {
+      const repoKey =
+        scan.repoId?.toString();
 
-        totalScans: 0,
+      if (!repoKey) {
+        continue;
+      }
 
-        totalVulnerabilities: 0,
-
-        high: 0,
-
-        medium: 0,
-
-        low: 0,
-
-        recommendations: [],
-      });
+      if (
+        !latestScansByRepo.has(repoKey)
+      ) {
+        latestScansByRepo.set(
+          repoKey,
+          scan
+        );
+      }
     }
 
-
-    // --------------------------------------------------
-    // LATEST SCAN
-    // --------------------------------------------------
-
-    const latestScan =
-      scans[0];
-
+    const latestScans =
+      Array.from(
+        latestScansByRepo.values()
+      );
 
     const findings =
-      latestScan.findings ||
-      [];
-
-
-    let high = 0;
-
-    let medium = 0;
-
-    let low = 0;
-
-
-    // --------------------------------------------------
-    // COUNT SEVERITIES
-    // --------------------------------------------------
-
-    findings.forEach(
-      (finding) => {
-
-        const severity =
-          finding.severity?.toUpperCase();
-
-
-        if (
-          severity === "HIGH"
-        ) {
-
-          high++;
-
-        } else if (
-          severity === "MEDIUM"
-        ) {
-
-          medium++;
-
-        } else {
-
-          low++;
-        }
-      }
-    );
-
-
-    // --------------------------------------------------
-    // RECOMMENDATIONS
-    // --------------------------------------------------
-
-    const recommendations =
-      [];
-
-
-    if (high > 0) {
-
-      recommendations.push(
-        "Immediately update or patch packages with HIGH severity vulnerabilities."
+      latestScans.flatMap(
+        (scan) =>
+          scan.findings || []
       );
-    }
 
-
-    if (medium > 0) {
-
-      recommendations.push(
-        "Review and update packages with MEDIUM severity vulnerabilities."
+    const critical =
+      findings.filter(
+        (f) =>
+          f.severity === "CRITICAL"
       );
-    }
 
-
-    if (low > 0) {
-
-      recommendations.push(
-        "Review LOW severity vulnerabilities during dependency maintenance."
+    const high =
+      findings.filter(
+        (f) =>
+          f.severity === "HIGH"
       );
-    }
 
-
-    if (
-      findings.length === 0
-    ) {
-
-      recommendations.push(
-        "No vulnerabilities were detected by npm audit."
+    const medium =
+      findings.filter(
+        (f) =>
+          f.severity === "MEDIUM"
       );
-    }
+
+    const low =
+      findings.filter(
+        (f) =>
+          f.severity === "LOW"
+      );
 
 
     return res.status(200).json({
+      message:
+        "Security analysis completed.",
 
-      totalScans:
-        scans.length,
+      data: {
+        repositoriesScanned:
+          latestScans.length,
 
-      totalVulnerabilities:
-        findings.length,
+        totalFindings:
+          findings.length,
 
-      high,
+        severity: {
+          critical:
+            critical.length,
 
-      medium,
+          high:
+            high.length,
 
-      low,
+          medium:
+            medium.length,
 
-      recommendations,
+          low:
+            low.length,
+        },
+
+        recommendations:
+          findings
+            .filter(
+              (finding) =>
+                finding.recommendation
+            )
+            .slice(0, 10)
+            .map(
+              (finding) => ({
+                packageName:
+                  finding.packageName,
+
+                severity:
+                  finding.severity,
+
+                recommendation:
+                  finding.recommendation,
+              })
+            ),
+      },
     });
-
-
   } catch (error) {
-
     console.error(
-      "SECURITY ANALYSIS ERROR:",
+      "Security analysis error:",
       error
     );
 
-
     return res.status(500).json({
-
       message:
-        "Failed to analyze security",
+        "Security analysis failed.",
+
+      error:
+        error.message,
     });
   }
 };
 
-
-// ======================================================
-// EXPORTS
-// ======================================================
 
 module.exports = {
   runScan,

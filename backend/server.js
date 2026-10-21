@@ -1,21 +1,31 @@
+
+const dotenv = require("dotenv");
+
+// Load environment variables before importing routes or services
+dotenv.config();
+
 const express = require("express");
 const cors = require("cors");
-const dotenv = require("dotenv");
 const connectDB = require("./config/db");
+
+
 const repoRoutes = require("./routes/repoRoutes");
 const scanRoutes = require("./routes/scanRoutes");
+const pipelineRoutes = require("./routes/pipelineRoutes");
 
-dotenv.config();
 
 connectDB();
 
 const app = express();
 
+// Middleware MUST come before routes
 app.use(cors());
 app.use(express.json());
 
+// Routes
 app.use("/api/repos", repoRoutes);
 app.use("/api/scans", scanRoutes);
+app.use("/api/pipelines", pipelineRoutes);
 
 app.get("/", (req, res) => {
   res.send("AI DevSecOps Backend Running");

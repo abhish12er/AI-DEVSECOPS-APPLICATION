@@ -1,715 +1,739 @@
+import { useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import {
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  Legend,
+} from "recharts";
 
-import { useEffect, useState } from "react";
-import API from "../api";
-import SecurityChart from "../components/SecurityChart";
-import VulnerabilityModal from "../components/VulnerabilityModal";
-import AISecurityAdvisor from "../components/AISecurityAdvisor";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
-export default function SecurityScans() {
+const SecurityScans = () => {
   const [repos, setRepos] = useState([]);
   const [scans, setScans] = useState([]);
-  const [filter, setFilter] = useState("ALL");
-  const [securityScore, setSecurityScore] = useState(100);
-  const [selectedRepoId, setSelectedRepoId] = useState("");
-  const [selectedFinding, setSelectedFinding] = useState(null);
-  const [scanningRepo, setScanningRepo] = useState(null);
+  
+const [sonarData, setSonarData] = useState(null);
+const [loadingSonar, setLoadingSonar] = useState(true);
+const [sonarError, setSonarError] = useState("");
 
-  const [stats, setStats] = useState({
-    totalScans: 0,
-    high: 0,
-    medium: 0,
-    low: 0,
-  });
+
+  const [selectedRepo, setSelectedRepo] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [loadingScans, setLoadingScans] = useState(true);
+
+  const [error, setError] = useState("");
+
+  // =====================================================
+  // FETCH REPOSITORIES
+  // =====================================================
 
   const fetchRepos = async () => {
     try {
-      const res = await API.get("/repos");
-      setRepos(res.data);
-    } catch (err) {
-      console.error("Failed to fetch repositories:", err);
+      const response = await axios.get(`${API}/repos`);
+
+      const repoData = Array.isArray(response.data)
+        ? response.data
+        : Array.isArray(response.data?.data)
+        ? response.data.data
+        : [];
+
+      setRepos(repoData);
+    } catch (error) {
+      console.error("Failed to fetch repositories:", error);
+      setError("Failed to load repositories.");
+      setRepos([]);
     }
   };
+
+  // =====================================================
+  // FETCH SCANS
+  // =====================================================
 
   const fetchScans = async () => {
     try {
-      const res = await API.get("/scans");
+      setLoadingScans(true);
 
-      const scanData = res.data || [];
+      const response = await axios.get(`${API}/scans`);
+
+      /*
+       * Backend response:
+       *
+       * {
+       *   message: "...",
+       *   data: [...]
+       * }
+       *
+       * We need response.data.data
+       */
+
+      const scanData = Array.isArray(response.data)
+        ? response.data
+        : Array.isArray(response.data?.data)
+        ? response.data.data
+        : [];
+
       setScans(scanData);
-
-      let high = 0;
-      let medium = 0;
-      let low = 0;
-
-      scanData.forEach((scan) => {
-        if (scan.findings) {
-          scan.findings.forEach((finding) => {
-            if (finding.severity === "HIGH") {
-              high++;
-            } else if (finding.severity === "MEDIUM") {
-              medium++;
-            } else if (finding.severity === "LOW") {
-              low++;
-            }
-          });
-        }
-      });
-
-      setStats({
-        totalScans: scanData.length,
-        high,
-        medium,
-        low,
-      });
-
-      const riskPoints =
-        high * 10 +
-        medium * 5 +
-        low;
-
-      const score = Math.max(100 - riskPoints, 0);
-
-      setSecurityScore(score);
-    } catch (err) {
-      console.error("Failed to fetch scans:", err);
-    }
-  };
-
-  const runScan = async (repoId) => {
-    try {
-      setScanningRepo(repoId);
-
-      console.log("Starting scan:", repoId);
-
-      await API.post("/scans/run", {
-        repoId: repoId,
-      });
-
-      await fetchScans();
-
-      alert("Security scan completed successfully!");
-    } catch (err) {
-      console.error("SCAN ERROR:", err);
-
-      alert(
-        err.response?.data?.message ||
-          err.message ||
-          "Scan failed"
-      );
+    } catch (error) {
+      console.error("Failed to fetch scans:", error);
+      setScans([]);
+      setError("Failed to load security scans.");
     } finally {
-      setScanningRepo(null);
+      setLoadingScans(false);
     }
   };
+
+  
+  // =====================================================
+  // FETCH SONARQUBE RESULTS
+  // =====================================================
+
+  const fetchSonarResults = async () => {
+    try {
+      setLoadingSonar(true);
+      setSonarError("");
+
+      const response = await axios.get(
+        `${API}/scans/sonar/results`
+      );
+
+      if (!response.data?.success || !response.data?.data) {
+        throw new Error("Invalid SonarQube response");
+      }
+
+      setSonarData(response.data.data);
+    } catch (error) {
+      console.error("Failed to fetch SonarQube results:", error);
+      setSonarError("Unable to load SonarQube results.");
+      setSonarData(null);
+    } finally {
+      setLoadingSonar(false);
+    }
+  };
+
+
+  // =====================================================
+  // LOAD DATA
+  // =====================================================
 
   useEffect(() => {
     const loadData = async () => {
-      await Promise.all([
-        fetchRepos(),
-        fetchScans(),
-      ]);
+      
+await Promise.all([
+  fetchRepos(),
+  fetchScans(),
+  fetchSonarResults(),
+]);
+
     };
 
     loadData();
   }, []);
 
-  const riskLevel =
-    securityScore >= 80
-      ? "Low Risk"
-      : securityScore >= 50
-      ? "Medium Risk"
-      : "High Risk";
+  // =====================================================
+  // RUN SCAN
+  // =====================================================
 
-  const getRepoName = (scan) => {
-    if (scan.repoId && scan.repoId.repoName) {
-      return scan.repoId.repoName;
+  const runScan = async () => {
+    if (!selectedRepo) {
+      setError("Please select a repository first.");
+      return;
     }
 
-    if (scan.repository && scan.repository.repoName) {
-      return scan.repository.repoName;
-    }
+    try {
+      setLoading(true);
+      setError("");
 
-    return "Unknown Repository";
+      await axios.post(`${API}/scans/run`, {
+        repoId: selectedRepo,
+      });
+
+      await fetchScans();
+
+      setSelectedRepo("");
+    } catch (error) {
+      console.error("Scan failed:", error);
+
+      setError(
+        error.response?.data?.message ||
+          "Security scan failed."
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const allFindings = scans.flatMap((scan) => {
-    return (scan.findings || []).map((finding) => {
-      return {
-        ...finding,
-        repositoryName: getRepoName(scan),
-        scanId: scan._id,
-        scanDate: scan.createdAt,
-      };
-    });
-  });
+  // =====================================================
+  // LATEST SCAN PER REPOSITORY
+  // =====================================================
 
-  const filteredAllFindings =
-    filter === "ALL"
-      ? allFindings
-      : allFindings.filter(
-          (finding) => finding.severity === filter
-        );
+const latestScans = useMemo(() => {
+  if (!Array.isArray(scans)) {
+    return [];
+  }
+
+  const latestMap = new Map();
+
+  scans
+    .filter((scan) => scan.status === "completed")
+    .forEach((scan) => {
+      const repoId =
+        scan.repoId?._id ||
+        scan.repoId ||
+        scan.repoName;
+
+      if (!repoId) return;
+
+      const scanner = scan.scanner || "npm-audit";
+      const key = `${repoId}:${scanner}`;
+
+      const existing = latestMap.get(key);
+
+      if (
+        !existing ||
+        new Date(scan.createdAt) >
+          new Date(existing.createdAt)
+      ) {
+        latestMap.set(key, scan);
+      }
+    });
+
+  return Array.from(latestMap.values());
+}, [scans]);
+
+        
+
+  // =====================================================
+  // ALL FINDINGS FROM LATEST SCANS
+  // =====================================================
+
+  const findings = useMemo(() => {
+    if (!Array.isArray(latestScans)) {
+      return [];
+    }
+
+    return latestScans.flatMap((scan) =>
+      Array.isArray(scan.findings)
+        ? scan.findings.map((finding) => ({
+            ...finding,
+
+            repoName:
+              scan.repoName ||
+              scan.repoId?.repoName ||
+              scan.repoId?.name ||
+              "Unknown Repository",
+
+            scanDate: scan.createdAt,
+          }))
+        : []
+    );
+  }, [latestScans]);
+
+  // =====================================================
+  // SEVERITY COUNTS
+  // =====================================================
+
+  const severityCounts = useMemo(() => {
+    return {
+      critical: findings.filter(
+        (f) => f.severity === "CRITICAL"
+      ).length,
+
+      high: findings.filter(
+        (f) => f.severity === "HIGH"
+      ).length,
+
+      medium: findings.filter(
+        (f) => f.severity === "MEDIUM"
+      ).length,
+
+      low: findings.filter(
+        (f) => f.severity === "LOW"
+      ).length,
+    };
+  }, [findings]);
+
+  // =====================================================
+  // CHART DATA
+  // =====================================================
+
+  const chartData = useMemo(() => {
+    const data = [
+      {
+        name: "Critical",
+        value: severityCounts.critical,
+      },
+      {
+        name: "High",
+        value: severityCounts.high,
+      },
+      {
+        name: "Medium",
+        value: severityCounts.medium,
+      },
+      {
+        name: "Low",
+        value: severityCounts.low,
+      },
+    ];
+
+    return data.filter((item) => item.value > 0);
+  }, [severityCounts]);
+
+  // =====================================================
+  // TOTALS
+  // =====================================================
+
+  const totalFindings = findings.length;
+
+  const vulnerableRepositories =
+    latestScans.filter(
+      (scan) =>
+        Array.isArray(scan.findings) &&
+        scan.findings.length > 0
+    ).length;
+
+  // =====================================================
+  // UI
+  // =====================================================
 
   return (
-    <div className="p-8 text-white">
+    <div className="min-h-screen bg-slate-950 text-white p-6">
+      {/* HEADER */}
 
-      {/* PAGE TITLE */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold">
           Security Scans
         </h1>
 
         <p className="text-slate-400 mt-2">
-          Real-time dependency vulnerability scanning
-          powered by npm audit.
+          Run real npm audit scans against your connected
+          repositories and review security findings.
         </p>
       </div>
 
-      {/* SECURITY OVERVIEW */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      {/* ERROR */}
 
-        <div className="bg-slate-900 p-5 rounded-xl border border-slate-800">
-          <p className="text-slate-400 text-sm">
-            Total Scans
-          </p>
-
-          <h2 className="text-3xl font-bold mt-2">
-            {stats.totalScans}
-          </h2>
+      {error && (
+        <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-300">
+          {error}
         </div>
+      )}
 
-        <div className="bg-slate-900 p-5 rounded-xl border border-red-800">
-          <p className="text-red-400 text-sm">
-            High Severity
-          </p>
+    
+{/* SONARQUBE ANALYSIS */}
 
-          <h2 className="text-3xl font-bold mt-2">
-            {stats.high}
-          </h2>
-        </div>
+<div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6">
+  <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+    <div>
+      <h2 className="text-xl font-semibold">
+        SonarQube Code Analysis
+      </h2>
+      <p className="text-sm text-slate-400 mt-1">
+        Static code analysis and Quality Gate results
+      </p>
+    </div>
 
-        <div className="bg-slate-900 p-5 rounded-xl border border-yellow-700">
-          <p className="text-yellow-400 text-sm">
-            Medium Severity
-          </p>
+    <button
+      type="button"
+      onClick={fetchSonarResults}
+      disabled={loadingSonar}
+      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm disabled:opacity-50"
+    >
+      {loadingSonar ? "Loading..." : "Refresh Results"}
+    </button>
+  </div>
 
-          <h2 className="text-3xl font-bold mt-2">
-            {stats.medium}
-          </h2>
-        </div>
+  {loadingSonar ? (
+    <p className="text-slate-400">
+      Loading SonarQube results...
+    </p>
+  ) : sonarError ? (
+    <p className="text-red-400">{sonarError}</p>
+  ) : sonarData ? (
+    <>
+      <div className="flex flex-wrap items-center gap-3 mb-5">
+        <span className="text-sm text-slate-400">
+          Project: {sonarData.projectKey}
+        </span>
 
-        <div className="bg-slate-900 p-5 rounded-xl border border-green-700">
-          <p className="text-green-400 text-sm">
-            Low Severity
-          </p>
-
-          <h2 className="text-3xl font-bold mt-2">
-            {stats.low}
-          </h2>
-        </div>
-
+        <span
+          className={`px-3 py-1 rounded-full text-xs font-semibold ${
+            sonarData.qualityGate === "OK"
+              ? "bg-green-500/10 text-green-400"
+              : "bg-red-500/10 text-red-400"
+          }`}
+        >
+          Quality Gate: {sonarData.qualityGate}
+        </span>
       </div>
 
-      {/* SECURITY SCORE */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-8">
-
-        <div className="flex items-center justify-between">
-
-          <div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        {[
+          {
+            label: "Bugs",
+            value: sonarData.metrics?.bugs,
+          },
+          {
+            label: "Vulnerabilities",
+            value: sonarData.metrics?.vulnerabilities,
+          },
+          {
+            label: "Security Hotspots",
+            value: sonarData.metrics?.securityHotspots,
+          },
+          {
+            label: "Code Smells",
+            value: sonarData.metrics?.codeSmells,
+          },
+          {
+            label: "Code Coverage",
+            value:
+              sonarData.metrics?.coverage == null
+                ? "N/A"
+                : `${sonarData.metrics.coverage}%`,
+          },
+          {
+            label: "Duplicated Lines",
+            value:
+              sonarData.metrics?.duplicatedLinesDensity == null
+                ? "N/A"
+                : `${sonarData.metrics.duplicatedLinesDensity}%`,
+          },
+        ].map((metric) => (
+          <div
+            key={metric.label}
+            className="bg-slate-800 border border-slate-700 rounded-lg p-4"
+          >
             <p className="text-slate-400 text-sm">
-              Overall Security Score
+              {metric.label}
             </p>
 
-            <h2 className="text-5xl font-bold mt-2">
-              {securityScore}/100
-            </h2>
-
-            <p
-              className={`mt-3 font-medium ${
-                riskLevel === "Low Risk"
-                  ? "text-green-400"
-                  : riskLevel === "Medium Risk"
-                  ? "text-yellow-400"
-                  : "text-red-400"
-              }`}
-            >
-              {riskLevel}
+            <p className="text-2xl font-bold mt-2">
+              {metric.value ?? "N/A"}
             </p>
           </div>
-
-          <div className="text-6xl">
-            🛡️
-          </div>
-
-        </div>
+        ))}
       </div>
+    </>
+  ) : (
+    <p className="text-slate-400">
+      No SonarQube results available.
+    </p>
+  )}
+</div>
 
-      {/* SECURITY CHART */}
-      <SecurityChart
-        high={stats.high}
-        medium={stats.medium}
-        low={stats.low}
-      />
 
-      {/* REPOSITORIES */}
-      <div className="mb-10">
+      {/* SCAN CONTROLS */}
 
-        <h2 className="text-xl mb-4">
-          Repositories
-        </h2>
-
-        {repos.length === 0 ? (
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-slate-400">
-            No repositories connected yet.
-          </div>
-
-        ) : (
-
-          <div className="grid gap-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6">
+        <div className="flex flex-col md:flex-row gap-4">
+          <select
+            value={selectedRepo}
+            onChange={(e) =>
+              setSelectedRepo(e.target.value)
+            }
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white outline-none focus:border-blue-500"
+          >
+            <option value="">
+              Select repository
+            </option>
 
             {repos.map((repo) => (
-
-              <div
+              <option
                 key={repo._id}
-                className="bg-slate-900 p-4 rounded-lg flex justify-between items-center border border-slate-800"
+                value={repo._id}
               >
-
-                <div>
-                  <p className="font-semibold">
-                    {repo.repoName}
-                  </p>
-
-                  <p className="text-sm text-slate-500">
-                    {repo.owner}
-                  </p>
-                </div>
-
-                <button
-                  onClick={() => runScan(repo._id)}
-                  disabled={scanningRepo === repo._id}
-                  className={`px-4 py-2 rounded-lg transition ${
-                    scanningRepo === repo._id
-                      ? "bg-slate-700 cursor-not-allowed"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  }`}
-                >
-                  {scanningRepo === repo._id
-                    ? "Scanning..."
-                    : "Run Scan"}
-                </button>
-
-              </div>
-
+                {repo.repoName ||
+                  `${repo.owner}/${repo.name}`}
+              </option>
             ))}
+          </select>
 
-          </div>
+          <button
+            onClick={runScan}
+            disabled={loading || !selectedRepo}
+            className="px-6 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+          >
+            {loading
+              ? "Scanning..."
+              : "Run Security Scan"}
+          </button>
+        </div>
 
+        {loading && (
+          <p className="text-sm text-slate-400 mt-3">
+            Cloning repository and running npm audit.
+            This may take a little while...
+          </p>
         )}
-
       </div>
 
-      {/* SEVERITY FILTER */}
-      <div className="flex gap-3 mb-6 flex-wrap">
+      {/* STAT CARDS */}
 
-        <button
-          onClick={() => setFilter("ALL")}
-          className={`px-4 py-2 rounded-lg ${
-            filter === "ALL"
-              ? "bg-blue-600"
-              : "bg-slate-800"
-          }`}
-        >
-          All
-        </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <p className="text-slate-400 text-sm">
+            Latest Scans
+          </p>
 
-        <button
-          onClick={() => setFilter("HIGH")}
-          className={`px-4 py-2 rounded-lg ${
-            filter === "HIGH"
-              ? "bg-red-600"
-              : "bg-slate-800"
-          }`}
-        >
-          High
-        </button>
+          <p className="text-3xl font-bold mt-2">
+            {latestScans.length}
+          </p>
+        </div>
 
-        <button
-          onClick={() => setFilter("MEDIUM")}
-          className={`px-4 py-2 rounded-lg ${
-            filter === "MEDIUM"
-              ? "bg-yellow-600"
-              : "bg-slate-800"
-          }`}
-        >
-          Medium
-        </button>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <p className="text-slate-400 text-sm">
+            Total Findings
+          </p>
 
-        <button
-          onClick={() => setFilter("LOW")}
-          className={`px-4 py-2 rounded-lg ${
-            filter === "LOW"
-              ? "bg-green-600"
-              : "bg-slate-800"
-          }`}
-        >
-          Low
-        </button>
+          <p className="text-3xl font-bold mt-2">
+            {totalFindings}
+          </p>
+        </div>
 
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <p className="text-slate-400 text-sm">
+            Critical / High
+          </p>
+
+          <p className="text-3xl font-bold mt-2">
+            {severityCounts.critical +
+              severityCounts.high}
+          </p>
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <p className="text-slate-400 text-sm">
+            Affected Repositories
+          </p>
+
+          <p className="text-3xl font-bold mt-2">
+            {vulnerableRepositories}
+          </p>
+        </div>
       </div>
 
-      {/* SCAN RESULTS */}
-      <div>
+      {/* CHART */}
 
-        <h2 className="text-xl mb-4">
-          Scan Results
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6">
+        <h2 className="text-xl font-semibold mb-4">
+          Vulnerability Severity
         </h2>
 
-        {scans.length === 0 ? (
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-slate-400">
-            No security scans have been performed yet.
+        {chartData.length === 0 ? (
+          <div className="h-64 flex items-center justify-center text-slate-500">
+            No vulnerabilities detected.
           </div>
-
         ) : (
-
-          <div className="grid gap-4">
-
-            {scans.map((scan) => {
-
-              const findings = scan.findings || [];
-
-              const filteredFindings =
-                filter === "ALL"
-                  ? findings
-                  : findings.filter(
-                      (finding) =>
-                        finding.severity === filter
-                    );
-
-              if (filteredFindings.length === 0) {
-                return null;
-              }
-
-              return (
-                <div
-                  key={scan._id}
-                  className="bg-slate-900 p-4 rounded-lg border border-slate-800"
+          <div className="w-full h-72 min-w-0">
+            <ResponsiveContainer
+              width="100%"
+              height="100%"
+              minWidth={0}
+              minHeight={250}
+            >
+              <PieChart>
+                <Pie
+                  data={chartData}
+                  dataKey="value"
+                  nameKey="name"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={90}
+                  label
                 >
+                  {chartData.map(
+                    (entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                      />
+                    )
+                  )}
+                </Pie>
 
-                  <div className="flex justify-between items-center mb-4">
+                <Tooltip />
 
-                    <div>
-                      <p className="text-lg font-bold">
-                        📦 {getRepoName(scan)}
-                      </p>
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
 
-                      <p className="text-xs text-slate-500 mt-1">
+      {/* SCAN HISTORY */}
+
+      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <div className="p-5 border-b border-slate-800">
+          <h2 className="text-xl font-semibold">
+            Latest Repository Scans
+          </h2>
+
+          <p className="text-sm text-slate-400 mt-1">
+            Showing the latest completed scan for each repository and scanner.
+          </p>
+        </div>
+
+        {loadingScans ? (
+          <div className="p-8 text-center text-slate-400">
+            Loading scans...
+          </div>
+        ) : latestScans.length === 0 ? (
+          <div className="p-8 text-center text-slate-500">
+            No security scans available yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-sm text-slate-400">
+                  <th className="px-5 py-4">
+                    Repository
+                  </th>
+
+                  
+<th className="px-5 py-4">
+  Scanner
+</th>
+
+
+                  <th className="px-5 py-4">
+                    Status
+                  </th>
+
+                  <th className="px-5 py-4">
+                    Findings
+                  </th>
+
+                  <th className="px-5 py-4">
+                    Critical
+                  </th>
+
+                  <th className="px-5 py-4">
+                    High
+                  </th>
+
+                  <th className="px-5 py-4">
+                    Medium
+                  </th>
+
+                  <th className="px-5 py-4">
+                    Low
+                  </th>
+
+                  <th className="px-5 py-4">
+                    Scanned
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {latestScans.map((scan) => {
+                  const scanFindings =
+                    Array.isArray(scan.findings)
+                      ? scan.findings
+                      : [];
+
+                  const critical =
+                    scanFindings.filter(
+                      (f) =>
+                        f.severity ===
+                        "CRITICAL"
+                    ).length;
+
+                  const high =
+                    scanFindings.filter(
+                      (f) =>
+                        f.severity === "HIGH"
+                    ).length;
+
+                  const medium =
+                    scanFindings.filter(
+                      (f) =>
+                        f.severity === "MEDIUM"
+                    ).length;
+
+                  const low =
+                    scanFindings.filter(
+                      (f) =>
+                        f.severity === "LOW"
+                    ).length;
+
+                  return (
+                    <tr
+                      key={scan._id}
+                      className="border-b border-slate-800 hover:bg-slate-800/40"
+                    >
+                      <td className="px-5 py-4 font-medium">
+                        {scan.repoName ||
+                          scan.repoId?.repoName ||
+                          "Unknown Repository"}
+                      </td>
+
+                      
+<td className="px-5 py-4">
+  <span className="inline-block rounded-lg bg-slate-800 border border-slate-700 px-3 py-1 text-sm text-slate-200">
+    {(scan.scanner || "npm-audit") === "trivy"
+      ? "Trivy"
+      : "npm audit"}
+  </span>
+</td>
+
+
+                      <td className="px-5 py-4">
+                        <span
+                          className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                            scan.status ===
+                            "completed"
+                              ? "bg-green-500/10 text-green-400"
+                              : "bg-red-500/10 text-red-400"
+                          }`}
+                        >
+                          {scan.status}
+                        </span>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        {scanFindings.length}
+                      </td>
+
+                      <td className="px-5 py-4 text-red-400">
+                        {critical}
+                      </td>
+
+                      <td className="px-5 py-4 text-orange-400">
+                        {high}
+                      </td>
+
+                      <td className="px-5 py-4 text-yellow-400">
+                        {medium}
+                      </td>
+
+                      <td className="px-5 py-4 text-blue-400">
+                        {low}
+                      </td>
+
+                      <td className="px-5 py-4 text-slate-400 text-sm">
                         {scan.createdAt
                           ? new Date(
                               scan.createdAt
                             ).toLocaleString()
-                          : "Timestamp unavailable"}
-                      </p>
-                    </div>
-
-                    <span className="text-sm text-slate-400">
-                      {filteredFindings.length} findings
-                    </span>
-
-                  </div>
-
-                  {filteredFindings.map(
-                    (finding, index) => (
-
-                      <div
-                        key={
-                          finding._id ||
-                          `${scan._id}-${index}`
-                        }
-                        onClick={() =>
-                          setSelectedFinding(finding)
-                        }
-                        className="border border-slate-700 rounded p-3 mb-3 cursor-pointer hover:border-blue-500 transition"
-                      >
-
-                        <div className="flex items-center justify-between">
-
-                          <p className="font-medium">
-                            {finding.title}
-                          </p>
-
-                          <span
-                            className={`text-xs px-2 py-1 rounded ${
-                              finding.severity === "HIGH"
-                                ? "bg-red-500/20 text-red-400"
-                                : finding.severity === "MEDIUM"
-                                ? "bg-yellow-500/20 text-yellow-400"
-                                : "bg-green-500/20 text-green-400"
-                            }`}
-                          >
-                            {finding.severity}
-                          </span>
-
-                        </div>
-
-                        <p className="text-sm text-slate-400 mt-1 break-all">
-                          {finding.cve || "N/A"}
-                        </p>
-
-                        <p className="text-slate-400 text-sm mt-1">
-                          CVSS Score:{" "}
-                          {finding.score ?? "N/A"}
-                        </p>
-
-                        <p className="text-slate-300 text-sm mt-2">
-                          💡 {finding.recommendation}
-                        </p>
-
-                      </div>
-
-                    )
-                  )}
-
-                </div>
-              );
-            })}
-
-          </div>
-
-        )}
-
-      </div>
-
-      {/* VULNERABILITY TABLE */}
-      <div className="mt-10">
-
-        <h2 className="text-2xl font-bold mb-4">
-          Vulnerability Table
-        </h2>
-
-        <div className="overflow-x-auto">
-
-          <table className="w-full bg-slate-900 rounded-xl overflow-hidden">
-
-            <thead className="bg-slate-800">
-
-              <tr>
-
-                <th className="text-left p-4">
-                  Severity
-                </th>
-
-                <th className="text-left p-4">
-                  Advisory
-                </th>
-
-                <th className="text-left p-4">
-                  Title
-                </th>
-
-                <th className="text-left p-4">
-                  Score
-                </th>
-
-                <th className="text-left p-4">
-                  Repository
-                </th>
-
-              </tr>
-
-            </thead>
-
-            <tbody>
-
-              {filteredAllFindings.length === 0 ? (
-
-                <tr>
-
-                  <td
-                    colSpan="5"
-                    className="p-8 text-center text-slate-400"
-                  >
-                    No vulnerabilities found.
-                  </td>
-
-                </tr>
-
-              ) : (
-
-                filteredAllFindings.map(
-                  (finding, index) => (
-
-                    <tr
-                      key={
-                        finding._id ||
-                        `${finding.scanId}-${index}`
-                      }
-                      onClick={() =>
-                        setSelectedFinding(finding)
-                      }
-                      className="border-t border-slate-800 hover:bg-slate-800/50 cursor-pointer transition"
-                    >
-
-                      <td className="p-4">
-
-                        <span
-                          className={`px-2 py-1 rounded text-xs ${
-                            finding.severity === "HIGH"
-                              ? "bg-red-500/20 text-red-400"
-                              : finding.severity === "MEDIUM"
-                              ? "bg-yellow-500/20 text-yellow-400"
-                              : "bg-green-500/20 text-green-400"
-                          }`}
-                        >
-                          {finding.severity}
-                        </span>
-
+                          : "N/A"}
                       </td>
-
-                      <td className="p-4 text-sm text-slate-300 break-all">
-                        {finding.cve || "N/A"}
-                      </td>
-
-                      <td className="p-4">
-                        {finding.title}
-                      </td>
-
-                      <td className="p-4">
-                        {finding.score ?? "N/A"}
-                      </td>
-
-                      <td className="p-4 text-blue-400">
-                        {finding.repositoryName}
-                      </td>
-
                     </tr>
-
-                  )
-                )
-
-              )}
-
-            </tbody>
-
-          </table>
-
-        </div>
-      </div>
-
-      {/* AI SECURITY ANALYSIS */}
-      <div className="mt-10">
-
-        <h2 className="text-2xl font-bold mb-4">
-          AI Security Analysis
-        </h2>
-
-        <select
-          value={selectedRepoId}
-          onChange={(e) =>
-            setSelectedRepoId(e.target.value)
-          }
-          className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-white mb-4"
-        >
-
-          <option value="">
-            Select repository for AI analysis
-          </option>
-
-          {repos.map((repo) => (
-
-            <option
-              key={repo._id}
-              value={repo._id}
-            >
-              {repo.repoName}
-            </option>
-
-          ))}
-
-        </select>
-
-        {selectedRepoId && (
-          <AISecurityAdvisor
-            repoId={selectedRepoId}
-          />
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-
       </div>
-
-      {/* SCAN HISTORY */}
-      <div className="mt-10">
-
-        <h2 className="text-2xl font-bold mb-6">
-          Recent Security Activity
-        </h2>
-
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
-
-          {scans.length === 0 ? (
-
-            <p className="text-slate-400">
-              No scan activity found.
-            </p>
-
-          ) : (
-
-            scans.map((scan) => (
-
-              <div
-                key={scan._id}
-                className="flex gap-4 mb-6 last:mb-0"
-              >
-
-                <div className="flex flex-col items-center">
-
-                  <div className="w-4 h-4 rounded-full bg-blue-500"></div>
-
-                  <div className="w-px h-full bg-slate-700"></div>
-
-                </div>
-
-                <div>
-
-                  <p className="font-semibold">
-                    Security scan completed for{" "}
-
-                    <span className="text-blue-400">
-                      {getRepoName(scan)}
-                    </span>
-                  </p>
-
-                  <p className="text-sm text-slate-400 mt-1">
-                    {scan.createdAt
-                      ? new Date(
-                          scan.createdAt
-                        ).toLocaleString()
-                      : "Timestamp unavailable"}
-                  </p>
-
-                  <p className="text-sm text-slate-500 mt-1">
-                    Findings:{" "}
-                    {scan.findings?.length || 0}
-                  </p>
-
-                </div>
-
-              </div>
-
-            ))
-
-          )}
-
-        </div>
-      </div>
-
-      {/* VULNERABILITY MODAL */}
-      <VulnerabilityModal
-        finding={selectedFinding}
-        onClose={() =>
-          setSelectedFinding(null)
-        }
-      />
-
     </div>
   );
-}
+};
+
+export default SecurityScans;
+
+
